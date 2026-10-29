@@ -39,6 +39,36 @@ def build_transcript(session_id: str, transcript: Transcript, audio_ms: float, a
     }
 
 
+def build_state(session_id: str, state: str) -> dict:
+    return {"type": "state", "session_id": session_id, "state": state}
+
+
+def build_coach_delta(session_id: str, text: str) -> dict:
+    return {"type": "coach_delta", "session_id": session_id, "text": text}
+
+
+def build_coach_done(session_id: str, text: str, provider: str, ttft_ms: float, total_ms: float) -> dict:
+    return {
+        "type": "coach_done",
+        "session_id": session_id,
+        "text": text,
+        "provider": provider,
+        "llm_ttft_ms": round(ttft_ms, 1),  # time to first token
+        "llm_total_ms": round(total_ms, 1),  # time to last token (includes forwarding deltas to the client)
+    }
+
+
+def build_summary(session_id: str, text: str, provider: str, ttft_ms: float | None, total_ms: float | None) -> dict:
+    return {
+        "type": "summary",
+        "session_id": session_id,
+        "text": text,
+        "provider": provider,
+        "llm_ttft_ms": None if ttft_ms is None else round(ttft_ms, 1),
+        "llm_total_ms": None if total_ms is None else round(total_ms, 1),
+    }
+
+
 class UtteranceBuffer:
     """Collects the audio chunks of one utterance. One instance per WebSocket connection."""
 
@@ -46,6 +76,10 @@ class UtteranceBuffer:
         self._pcm = bytearray()
         self._sample_rate: int | None = None
         self._overflowed = False
+
+    def discard(self) -> None:
+        """Throw away a half-recorded utterance (used on pause/end so stale audio cannot leak into the next one)."""
+        self._reset()
 
     def _reset(self) -> None:
         self._pcm = bytearray()

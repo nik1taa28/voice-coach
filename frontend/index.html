@@ -13,16 +13,36 @@
   #transcript { list-style: none; padding: 0; }
   #transcript li { border-left: 3px solid #999; padding: .25rem .75rem; margin: .5rem 0; }
   #transcript li.error { border-color: #b91c1c; color: #b91c1c; }
+  #transcript li.coach { border-color: #1d4ed8; }
+  #transcript li.you { border-color: #15803d; }
+  #setup, #controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .5rem 0; }
+  #topic { font-size: 1rem; padding: .4rem; flex: 1 1 12rem; }
+  select { font-size: 1rem; padding: .4rem; }
+  #summary { border: 1px solid #999; padding: .5rem .75rem; margin-top: 1rem; white-space: pre-wrap; }
+  #summary:empty { display: none; }
 </style>
 </head>
 <body>
 <h1>Voice Coach</h1>
-<p>M1: speak, press stop, see the transcript and per-stage timing.</p>
-<button id="toggle" disabled>Start recording</button>
+<p>M2: pick a topic, start, answer by voice, and the coach replies with a follow-up.</p>
+<div id="setup">
+  <input id="topic" value="Python basics" maxlength="80" aria-label="Topic">
+  <select id="difficulty" aria-label="Difficulty">
+    <option>easy</option><option selected>medium</option><option>hard</option>
+  </select>
+  <button id="start" disabled>Start interview</button>
+</div>
+<div id="controls">
+  <button id="toggle" disabled>Start recording</button>
+  <button id="pause" disabled>Pause</button>
+  <button id="resume" disabled>Resume</button>
+  <button id="end" disabled>End &amp; summarise</button>
+</div>
 <div id="status">connecting…</div>
 <div id="warn"></div>
 <div id="timing"></div>
 <ul id="transcript"></ul>
+<div id="summary"></div>
 
 <script>
 const TARGET_RATE = 16000;
@@ -50,8 +70,11 @@ registerProcessor('batcher', Batcher);
 
 const $ = (id) => document.getElementById(id);
 const toggle = $('toggle'), statusEl = $('status'), warnEl = $('warn'), timingEl = $('timing'), list = $('transcript');
+const startBtn = $('start'), pauseBtn = $('pause'), resumeBtn = $('resume'), endBtn = $('end'), summaryEl = $('summary');
 
 let ws, ctx, stream, node, recording = false, stopPressedAt = 0;
+let state = 'idle', connected = false, busy = false; // busy: stop pressed, server has not answered yet
+let coachLine = null; // the <li> being filled by coach_delta messages
 let ratio = 1, carry = new Float32Array(0);
 
 function addLine(text, cls) {
@@ -59,6 +82,20 @@ function addLine(text, cls) {
   li.textContent = text; // textContent, never innerHTML: server text is untrusted
   if (cls) li.className = cls;
   list.appendChild(li);
+  return li;
+}
+
+// Buttons follow the SERVER's state, so the page cannot drift from the real session.
+function refresh() {
+  startBtn.disabled = !(connected && state === 'idle');
+  toggle.disabled = !(connected && state === 'listening' && (recording || !busy));
+  pauseBtn.disabled = !(connected && state === 'listening' && !recording && !busy);
+  resumeBtn.disabled = !(connected && state === 'paused');
+  endBtn.disabled = !(connected && (state === 'listening' || state === 'paused') && !recording && !busy);
+}
+
+function showProvider(provider) {
+  if (provider === 'fake') warnEl.textContent = 'FAKE provider: placeholder text, not real speech recognition or coaching.';
 }
 
 // Box-average downsample from the mic's native rate to 16 kHz, then Float32 [-1,1] -> Int16.
@@ -83,22 +120,42 @@ function downsample(chunk) {
 function connect() {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${scheme}://${location.host}/ws`);
-  ws.onopen = () => { statusEl.textContent = 'connected'; toggle.disabled = false; };
-  ws.onclose = () => { statusEl.textContent = 'disconnected - reload the page'; toggle.disabled = true; };
+  ws.onopen = () => { statusEl.textContent = 'connected'; connected = true; refresh(); };
+  ws.onclose = () => { statusEl.textContent = 'disconnected - reload the page'; connected = false; refresh(); };
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === 'session') {
       statusEl.textContent = `connected, session ${msg.session_id.slice(0, 8)}`;
+    } else if (msg.type === 'state') {
+      state = msg.state;
+      if (state === 'listening') busy = false;
+      statusEl.textContent = `session ${msg.session_id.slice(0, 8)}: ${state}`;
+      refresh();
     } else if (msg.type === 'transcript') {
       const roundTrip = Math.round(performance.now() - stopPressedAt);
-      addLine(msg.text);
+      addLine(`You: ${msg.text}`, 'you');
       timingEl.textContent =
         `audio ${msg.audio_ms} ms | asr ${msg.asr_ms} ms | rtf ${msg.rtf} | ` +
-        `stop->text ${roundTrip} ms (browser clock, includes network) | provider ${msg.provider}`;
-      warnEl.textContent = msg.provider === 'fake'
-        ? 'FAKE provider: this text is a placeholder, not real speech recognition.' : '';
+        `stop->text ${roundTrip} ms (browser clock, includes network) | asr provider ${msg.provider}`;
+      warnEl.textContent = '';
+      showProvider(msg.provider);
+    } else if (msg.type === 'coach_delta') {
+      if (!coachLine) coachLine = addLine('Coach: ', 'coach');
+      coachLine.textContent += msg.text;
+    } else if (msg.type === 'coach_done') {
+      if (!coachLine) coachLine = addLine('', 'coach');
+      coachLine.textContent = `Coach: ${msg.text}`;
+      coachLine = null;
+      timingEl.textContent += ` | llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms | llm provider ${msg.provider}`;
+      showProvider(msg.provider);
+    } else if (msg.type === 'summary') {
+      summaryEl.textContent = `Summary (${msg.provider}):\n${msg.text}`;
+      showProvider(msg.provider);
     } else if (msg.type === 'error') {
+      if (coachLine) { coachLine.remove(); coachLine = null; } // partial reply from a failed turn: discard
+      busy = false;
       addLine(`error: ${msg.reason}`, 'error');
+      refresh();
     }
   };
 }
@@ -124,12 +181,15 @@ async function startRecording() {
 
   ws.send(JSON.stringify({ type: 'utterance_start', sample_rate: TARGET_RATE }));
   recording = true;
-  toggle.textContent = 'Stop & transcribe';
+  toggle.textContent = 'Stop & send';
   statusEl.textContent = `recording (mic ${ctx.sampleRate} Hz -> ${TARGET_RATE} Hz)`;
+  refresh();
 }
 
 async function stopRecording() {
   recording = false;
+  busy = true;
+  refresh();
   stream.getTracks().forEach((t) => t.stop());
   await ctx.close();
   stopPressedAt = performance.now();
@@ -139,6 +199,13 @@ async function stopRecording() {
 }
 
 toggle.onclick = () => (recording ? stopRecording() : startRecording());
+startBtn.onclick = () => {
+  list.textContent = ''; summaryEl.textContent = ''; timingEl.textContent = ''; warnEl.textContent = '';
+  ws.send(JSON.stringify({ type: 'start', topic: $('topic').value, difficulty: $('difficulty').value }));
+};
+pauseBtn.onclick = () => ws.send(JSON.stringify({ type: 'pause' }));
+resumeBtn.onclick = () => ws.send(JSON.stringify({ type: 'resume' }));
+endBtn.onclick = () => ws.send(JSON.stringify({ type: 'end' }));
 connect();
 </script>
 </body>

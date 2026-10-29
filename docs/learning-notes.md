@@ -107,3 +107,85 @@ One warm sample is **not** a distribution. Pending: model load time from the dis
 - Uvicorn needs `websockets` (or `wsproto`) for `/ws`; added to `requirements.txt`.
 - Uvicorn only configures its own loggers, so our `logger.info` lines were hidden until `logging.basicConfig(level=INFO)`. That also exposes noisy `httpx2` / Hugging Face request lines; structured logging comes in M5.
 - Hugging Face warns about unauthenticated downloads. Harmless for a public model.
+
+## M2: LLM follow-up, history, session state machine (timed)
+
+```mermaid
+stateDiagram-v2
+  [*] --> idle
+  idle --> thinking: start (opener being generated)
+  thinking --> listening: coach reply complete
+  thinking --> idle: opener failed
+  thinking --> listening: later turn failed (user message dropped)
+  listening --> thinking: answer transcribed
+  listening --> paused: pause
+  paused --> listening: resume
+  listening --> ended: end
+  paused --> ended: end
+```
+
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant S as /ws (main.py)
+  participant M as InterviewSession
+  participant L as LLMProvider
+  B->>S: utterance_end
+  S->>S: ASR (timed) -> transcript
+  S->>M: add_user(text)  [listening -> thinking]
+  S->>L: stream(build_messages(history))
+  L-->>S: piece 1  (TTFT stops here)
+  S-->>B: coach_delta
+  L-->>S: ... last piece
+  S->>M: add_coach(full text)  [thinking -> listening]
+  S-->>B: coach_done {ttft, total}
+```
+
+- The session is a **state machine**: every event is checked against the current state in one place (`InterviewSession`), so "answer while paused" cannot corrupt history. It is pure Python, so every transition is a plain unit test.
+- The LLM sits behind `LLMProvider` (a `Protocol` with `stream()`), like ASR. `FakeLLM` is deterministic and labels itself; `GeminiLLM` talks plain HTTPS + server-sent events.
+- Streaming is real only on the coach reply: pieces are forwarded as they arrive. The summary and ASR wait for a complete result and are not streamed.
+- History is written only when a reply is **complete**. A failed turn removes the unanswered user message, so roles always alternate and the prompt stays valid.
+- Prompt = system prompt (topic, difficulty) + fixed "begin" message + the last 12 messages, never starting mid-exchange. Bounded prompt, so cost and latency cannot grow forever.
+- Two LLM numbers: **TTFT** (time to first piece, what the user feels) and **total** (to the last piece). `llm_total_ms` includes forwarding to the client.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| LLM provider | Gemini free tier (default fake) | local Ollama | no CPU competition with Whisper and fast to set up; transcripts leave the machine, rate limits, needs a key. Ollama is private but heavy on a laptop |
+| Gemini client | plain `httpx` + SSE parsing | Google SDK | one fewer dependency and visible timing; we parse events ourselves |
+| API key | `x-goog-api-key` header | `?key=` in URL | keys in URLs leak through logs and error messages |
+| State machine | pure class, explicit transitions | flags in `main.py` | more code; each illegal event handled once and tested without a server |
+| History write | after the full reply only | append each delta | no half replies after failures; the client holds partial text and discards it on `error` |
+| Failed turn | drop the unanswered user message | keep it and retry | roles keep alternating, prompt stays valid; the user has to speak again |
+| Recording in `idle` | allowed (transcribe only, no LLM) | require `start` first | keeps M1 behaviour and tests; slightly blurs the state machine |
+| Missing LLM key | error message, then close | silently fall back to fake | a fake must never pass as real |
+| Prompt limit | last 12 messages | whole history | loses early context; bounded latency |
+| HTTP client | new `AsyncClient` per turn | one shared client | simple; pays a TLS handshake each turn, to be measured in M5 |
+
+### Verified so far
+- 74 tests pass (state machine, prompts, fake LLM, Gemini against a **mocked** HTTP transport, WebSocket flow with fake and failing LLMs).
+- By hand, fake providers only: full flow in the browser worked (start, answer, follow-up, end, summary).
+- **Pending:** a real Gemini call (model name `gemini-2.5-flash` unconfirmed), real TTFT/total numbers, pause/resume in the browser.
+
+**Key concept:** time to first token vs total time. With streaming, a user starts reading or hearing the answer after TTFT, not after the full reply. This matters most in M3, when text-to-speech can begin on the first sentence.
+
+**Interview question:** Why use a state machine for the session instead of a few booleans?
+*Short answer:* Booleans allow impossible combinations (paused and thinking at once) and spread the checks across handlers. A state machine lists the legal transitions in one place, rejects everything else with a clear error, and can be unit tested without any network.
+
+**Exercise:** the user presses Pause while the coach is still streaming. In the current code, what happens, and why? Then sketch how M4 would change it (hint: the handler is blocked inside `await coach_turn`, so it is not reading the socket).
+
+**Common mistake:** saving partial output to history as it streams. If the stream dies halfway, the next prompt contains a cut-off coach message, or two user messages in a row, and the model's behaviour becomes hard to explain. Write history once, when the turn succeeds.
+
+### M2 addendum: first real Gemini measurement
+
+| Call | Model | ttft_ms | total_ms | Pieces | Notes |
+|---|---|---|---|---|---|
+| opener, standalone script (`GeminiLLM.stream` directly) | gemini-2.5-flash | 3129 | 3283 | 2 | one sample, not a distribution; includes a fresh TLS connection; hardware and network not recorded |
+
+- Almost all the time (3129 of 3283 ms) passed **before the first piece**. After that, the rest arrived within about 150 ms.
+- So for short replies, streaming barely helps: the wait is TTFT, not the transfer. It would matter for long replies, or when M3 starts speaking the first sentence early.
+- **Hypotheses, not yet tested** (each needs its own measurement):
+  - the model "thinks" before answering (Gemini 2.5 models have a thinking phase by default);
+  - the new connection per turn adds a handshake;
+  - the first call after idle is slower than later ones.
+- The reply also ran longer than the prompt's "max 2 sentences" ("Alright, let's get started." plus the question). The prompt is a request, not a guarantee; the app does not enforce length.
