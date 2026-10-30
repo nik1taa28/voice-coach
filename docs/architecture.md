@@ -2,7 +2,7 @@
 
 Status key: **Planned** / **Implemented** (code exists) / **Verified** (tests run and passed, or run by hand with the result recorded).
 
-## System as of M1
+## System as of M3 (the diagram below shows the M1 audio path; the M3 reply path is under "Reply path and latency budget")
 
 ```mermaid
 flowchart LR
@@ -41,7 +41,16 @@ flowchart LR
 | Recording allowed in `idle` (M1 transcribe-only) and `listening` | Implemented | keeps M1 behaviour; rejected while paused/thinking/ended |
 | Frontend controls + transcript (M2 piece 4) | Verified (by hand, fake providers) | user-reported: start, opening question, one spoken answer, follow-up, end, summary all worked with the FAKE banner. Pause/resume in the browser **not reported**. `tests/test_frontend.py` only checks control ids |
 | Real Gemini latency (M2) | Partial | one sample: ttft 3129 ms, total 3283 ms (standalone script, opener prompt, user's machine and network). Distribution **pending** (M5). Not yet run through `/ws` in the browser, and pause/resume in the browser not reported |
-| TTS + latency budget (M3) | Planned | |
+| `SentenceSplitter` (M3 piece 1) | Verified | `tests/test_sentences.py` (9). Small abbreviation list; "J. Smith" would split wrongly |
+| `TTSProvider`, `FakeTTS` (labelled beep), `BrowserTTS` (text only), `TTS_PROVIDER` selection (M3 piece 2) | Verified | `tests/test_tts.py` (9) |
+| WS wiring: `speak` per sentence, `first_sentence_ms` / `first_speak_ms`, one `speech failed` error per turn, `playback_started` (M3 piece 3) | Verified (tests, fake/scripted providers) | `tests/test_tts_ws.py` (14): order, speech starts before the LLM finishes, TTS failure keeps text and history, LLM failure mid-reply does not speak the tail |
+| Frontend speech queue, cancel rules, per-stage FAKE labels, browser-clock `stop->audio` (M3 piece 4) | Verified (by hand, one session each) | user-reported: fake beep heard, real browser voice heard, opener spoken without an extra click, voice cut off mid-sentence by Pause / Start recording, pause + resume worked. Browser: VS Code's built-in browser, user guessed Chromium ("chrome i guess"), **not confirmed**. Real Chrome, Safari, Firefox: **not tested** |
+| TTS runs inline in the LLM stream loop | Known limitation | a slow server-side TTS delays reading the next LLM piece, and `llm_total_ms` includes it. A queue + worker task would fix it but needs the cancellation design from M4 |
+| Streaming claim (M3) | Stated precisely | LLM -> splitter -> TTS dispatch is per piece / per sentence. Each TTS call waits for one **complete sentence**; not token-level TTS. ASR still waits for the full utterance |
+| Spoken summary | Not done | the end summary is text only |
+| Piper (server-side TTS) | Not planned for M3 | the interface allows it later (`SpokenChunk.audio` carries bytes) |
+| Real Whisper + Gemini + voice through the whole pipeline | Pending | the only M3 pipeline samples used the fake ASR and LLM (see budget table) |
+| Latency budget (M3) | Partial | table below: two single samples with fake upstream stages; real numbers **pending** |
 | Reliability (M4) | Planned | ASR runs while the session is not reading its socket; revisit for cancellation |
 | Logs / metrics / load test (M5) | Planned | |
 | Docker / CI (M6) | Planned | CI must install `requirements-asr.txt` for `tests/test_whisper.py` (needs numpy) |
@@ -62,7 +71,42 @@ Server -> client:
 - `{"type":"state","session_id","state"}`: idle / listening / thinking / paused / ended
 - `{"type":"coach_delta","session_id","text"}` (streamed pieces), then `{"type":"coach_done","session_id","text","provider","llm_ttft_ms","llm_total_ms"}`; on failure an `error` follows and the client must discard unfinished deltas
 - `{"type":"summary","session_id","text","provider","llm_ttft_ms","llm_total_ms"}`: sent once complete, not streamed; `provider` is `none` when no answers were recorded
+- `{"type":"speak","session_id","seq","text","provider","tts_ms"}` plus `mime` and `audio_b64` when the server synthesised audio (`fake`); `provider` is `fake` or `browser`; `tts_ms` is `null` for `browser` (the server did no synthesis). One per sentence, in `seq` order, sent before `coach_done`. After an `error` with reason `coach reply failed` the client must discard queued speech as well as unfinished deltas
+- `coach_done` also carries `tts_provider`, `first_sentence_ms` (turn start -> first complete sentence) and `first_speak_ms` (turn start -> first `speak` sent, `null` if nothing was spoken); server clock
 - `{"type":"echo","session_id","data","server_ts"}`
 - `{"type":"error","session_id","reason"}`; the connection stays open
 
-Error reasons: `invalid JSON`, `JSON must be an object`, `audio received before utterance_start`, `utterance_end without utterance_start`, `no audio received`, `PCM16 data must have an even number of bytes`, `sample_rate must be 16000`, `utterance already in progress; ...`, `utterance longer than 60s` (sent once, further frames dropped until `utterance_end`), `transcription failed`, `coach reply failed`, `summary failed`, `LLM unavailable: ...` (connection then closes), `cannot <event> while <state>`, `empty answer`, `no speech recognized, please try again`, topic/difficulty validation messages.
+Client -> server (M3): `{"type":"playback_started","stop_to_audio_ms":<0..600000>}`, sent once per answer when sound actually starts. Measured on the **browser** clock (stop press -> first audible sound); the server only logs it and never subtracts it from server timings. No reply on success; invalid values get an `error`.
+
+Error reasons: `invalid JSON`, `JSON must be an object`, `audio received before utterance_start`, `utterance_end without utterance_start`, `no audio received`, `PCM16 data must have an even number of bytes`, `sample_rate must be 16000`, `utterance already in progress; ...`, `utterance longer than 60s` (sent once, further frames dropped until `utterance_end`), `transcription failed`, `coach reply failed`, `summary failed`, `LLM unavailable: ...` (connection then closes), `cannot <event> while <state>`, `empty answer`, `no speech recognized, please try again`, topic/difficulty validation messages, `speech failed` (sent once per turn; the text and history are unaffected and sentences already queued still play), `stop_to_audio_ms must be a number between 0 and 600000`.
+
+## Reply path and latency budget (M3)
+
+```mermaid
+flowchart LR
+  A[stop press<br/>browser clock starts] --> B[ASR<br/>asr_ms]
+  B --> C[LLM first piece<br/>llm_ttft_ms]
+  C --> D[first sentence complete<br/>first_sentence_ms]
+  D --> E[TTS<br/>tts_ms, server voices only]
+  E --> F[speak sent<br/>first_speak_ms]
+  F --> G[first sound<br/>stop_to_audio_ms<br/>browser clock stops]
+```
+
+Server stages use `time.perf_counter()`; `first_sentence_ms` and `first_speak_ms` count from the start of `coach_turn` (after ASR). The last row uses the browser's `performance.now()`. The two clocks are never added or subtracted.
+
+Measured, user's machine (macOS; hardware not recorded), one session per column, **single samples, not a distribution**. ASR and LLM were the fakes, so these are an overhead floor, not the real pipeline:
+
+| Stage | Where | Fake voice (beep) | Browser voice | Real pipeline |
+|---|---|---|---|---|
+| ASR | server | 0 ms (fake) | 0.1 ms (fake) | earlier M1 sample: 987.6 ms for 7.3 s audio, faster-whisper `tiny.en`; not re-run in M3 |
+| LLM first piece | server | 0.1 ms (fake) | 0.1 ms (fake) | earlier M2 sample: 3129 ms, Gemini, standalone; not re-run in M3 |
+| First sentence complete (from turn start) | server | 1 ms | 0.8 ms | pending |
+| TTS synthesis | server | not shown in the UI (`tts_ms` is in the `speak` message) | n/a (no server synthesis) | pending |
+| First `speak` sent (from turn start) | server | 18.3 ms | 0.9 ms | pending |
+| LLM total | server | 18.3 ms | 0.9 ms | pending |
+| Stop press -> first sound | **browser** | 52 ms | 69 ms | pending |
+
+Reading the table:
+- `llm_total_ms` (18.3 vs 0.9 ms) differs between the columns by about the fake TTS cost. This is consistent with TTS running inline in the stream loop, but it compares two different runs and is **not** an isolated measurement.
+- With ASR and LLM at about 0 ms, the 52 / 69 ms in the last row is browser-side start-up (audio element or speech engine) plus a few ms of localhost. It says nothing about the real total.
+- The first sound waits for the first *complete sentence*, so with a real LLM the budget is dominated by ASR + LLM TTFT + time to finish sentence 1. Targets are not set until real numbers exist (M5).

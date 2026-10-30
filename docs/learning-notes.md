@@ -189,3 +189,89 @@ sequenceDiagram
   - the new connection per turn adds a handshake;
   - the first call after idle is slower than later ones.
 - The reply also ran longer than the prompt's "max 2 sentences" ("Alright, let's get started." plus the question). The prompt is a request, not a guarantee; the app does not enforce length.
+
+## M3: Text-to-speech + full pipeline + latency budget
+
+```mermaid
+sequenceDiagram
+  participant L as LLM
+  participant S as coach_turn
+  participant T as TTSProvider
+  participant B as Browser
+  L-->>S: piece "One. "
+  S-->>B: coach_delta
+  S->>T: synthesize("One.")  (splitter confirmed the boundary)
+  T-->>S: chunk
+  S-->>B: speak seq 0
+  Note over B: plays sentence 0
+  L-->>S: piece "Two. " (arrives while sentence 0 plays)
+  S-->>B: coach_delta, then speak seq 1
+  L-->>S: stream ends
+  S->>T: flush() tail, if any
+  S-->>B: coach_done {first_sentence_ms, first_speak_ms}
+  B-->>S: playback_started {stop_to_audio_ms}  (browser clock)
+```
+
+```mermaid
+flowchart LR
+  Q[speech queue] -->|plays in order| P[playing]
+  P -->|ended| Q
+  X[cancelSpeech] -.-> Q
+  X -.-> P
+  C1[Pause / state paused, ended, idle] --> X
+  C2[Start recording: mic would hear the coach] --> X
+  C3[error: coach reply failed] --> X
+  C4[disconnect] --> X
+  N[error: speech failed] -. does NOT cancel .-> Q
+```
+
+- The reply is cut into sentences as it streams. Sentence 1 is spoken while the LLM writes sentence 2, so **time to first sound** depends on the first sentence, not the whole reply.
+- Honest streaming claim: LLM -> splitter -> TTS dispatch is per piece and per sentence. Each TTS call waits for a complete sentence (not token-level TTS), and ASR still waits for the full utterance.
+- `SentenceSplitter` is pure: a boundary needs `.?!`, an optional closing quote, then whitespace. A trailing `.` at the end of the buffer waits for the next piece (it could be `3.` then `5`), so a sentence is released one piece late, or at `flush()`.
+- `SpokenChunk.audio` is bytes or `None`. `None` means "the browser speaks `text`", so one shape serves the browser now and a server engine (Piper) later.
+- The server cannot hear playback. For browser speech it reports `tts_ms: null`, and the browser reports when sound actually started (`playback_started`). The two clocks are never mixed.
+- A TTS failure is isolated: one `speech failed` error, the text keeps streaming, history is written as usual. An LLM failure mid-reply discards text **and** queued speech on the client.
+- TTS runs inline in the stream loop, so a slow server-side TTS delays reading the next LLM piece and `llm_total_ms` includes it. Fixing it (queue + worker) needs cancellation, which is M4.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Real TTS engine | browser `speechSynthesis` (`TTS_PROVIDER=browser`) | local Piper | zero install and starts fast; voices differ per browser and OS, some Chrome voices use a cloud, and the server cannot time it. Piper is local and server-timeable but needs a binary + voice and competes with Whisper for CPU |
+| Fake TTS | labelled 440 Hz beep as a WAV | silence, or a canned recording | deterministic, testable, audible in a demo; clearly not speech, and the UI says FAKE |
+| Speech unit | one complete sentence | token or word level | simple and natural prosody; first sound waits for the first full sentence |
+| Audio transport | base64 inside JSON | binary WebSocket frames | one message type, easy to test; about 33% larger. Fine for short sentences |
+| Queue location | client, in order by `seq` | server paces playback | the browser knows when audio ends; the server cannot |
+| Cancel rules | explicit list (pause, end, idle, record, reply failed, disconnect) | cancel on any error | `speech failed` must not cut the sentences already playing |
+| First-audio timing | browser `performance.now()` | server estimate | that is where the user hears it; costs an extra client -> server message |
+| TTS in the stream loop | inline await | queue + worker task | simple and testable now; couples TTS speed to LLM reading until M4 |
+| Warnings | one per stage (asr / llm / tts) | one global line | a fake stage is never hidden by a real one |
+
+### Verified so far
+- 107 tests pass (`.venv/bin/python -m pytest -q`): 9 splitter, 9 TTS, 14 WS (`tests/test_tts_ws.py`), 1 frontend wiring, plus the earlier 74.
+- By hand, user-reported, one session per provider: fake beep heard, real browser voice heard, opener spoken without an extra click, voice stopped mid-sentence by Pause and by Start recording, pause + resume worked.
+- Browser used: VS Code's built-in browser; user guessed it is Chromium but did not confirm. Real Chrome, Safari and Firefox: **not tested**.
+- **Pending:** the real pipeline (Whisper + Gemini + voice) end to end, a distribution of any number (M5), two sessions at once, long replies, a slow server TTS in the browser.
+
+### Measured (one sample per column; ASR and LLM were fakes)
+| Stage | Fake voice | Browser voice |
+|---|---|---|
+| first sentence complete (server, from turn start) | 1 ms | 0.8 ms |
+| first `speak` sent (server) | 18.3 ms | 0.9 ms |
+| llm_total (server) | 18.3 ms | 0.9 ms |
+| stop press -> first sound (browser clock) | 52 ms | 69 ms |
+
+These are an overhead floor with fake upstream stages, not the pipeline latency. The 18.3 vs 0.9 ms gap fits "inline fake TTS cost is inside `llm_total_ms`", but it compares two runs and is not an isolated measurement. Full table: `docs/architecture.md`.
+
+**Key concept:** pipelining. Overlapping stages (generate sentence 2 while sentence 1 plays) cuts time to first sound, not total work. Measure it where the user feels it, and be exact about the granularity: here it is per sentence.
+
+**Interview question:** Is your voice pipeline streaming end to end?
+*Short answer:* Partly, and I can say exactly where. Audio streams in, but ASR waits for the whole utterance. The LLM streams pieces, a splitter cuts them into sentences, and each complete sentence goes to TTS right away, so sentence 1 plays while sentence 2 is generated. Each TTS call still waits for one full sentence, and TTS runs inline, so a slow server TTS would delay reading the LLM. I measure server stages with `perf_counter` and first sound in the browser, never mixing the clocks.
+
+**Exercise:** in `tests/test_tts_ws.py`, give `FakeTTS(delay_s=0.2)` to a 3-sentence `ScriptedLLM`. Predict `first_speak_ms` and `llm_total_ms` first, then run it and compare. What would a queue + worker task change, and what new failure case would it create on pause?
+
+**Common mistake:** subtracting a browser timestamp from a server one (or adding them). The clocks are unrelated, so the result is meaningless. Report each on its own clock, and say where each was measured.
+
+**Observed:**
+- This project has no async pytest plugin, so async tests are wrapped in `asyncio.run`, as in `tests/test_llm.py`. My first TTS test file used `async def` tests and failed with "async def functions are not natively supported" until I switched pattern.
+- Chrome can garbage-collect a `SpeechSynthesisUtterance` before `onend` fires, so the page keeps a global reference.
+- `speechSynthesis.cancel()` fires `onend` / `onerror` for the cancelled item; a generation counter stops those late callbacks from advancing a cleared queue.

@@ -1,9 +1,11 @@
 """Pure helpers for session handling. No FastAPI imports, so they are trivial to unit test."""
+import base64
 import uuid
 from datetime import datetime, timezone
 
 from backend.asr.base import Transcript
 from backend.audio import MAX_UTTERANCE_MS, AudioError, pcm16_duration_ms, validate_pcm, validate_sample_rate
+from backend.tts.base import SpokenChunk
 
 
 def new_session_id() -> str:
@@ -47,15 +49,47 @@ def build_coach_delta(session_id: str, text: str) -> dict:
     return {"type": "coach_delta", "session_id": session_id, "text": text}
 
 
-def build_coach_done(session_id: str, text: str, provider: str, ttft_ms: float, total_ms: float) -> dict:
+def build_coach_done(
+    session_id: str,
+    text: str,
+    provider: str,
+    ttft_ms: float,
+    total_ms: float,
+    tts_provider: str | None = None,
+    first_sentence_ms: float | None = None,
+    first_speak_ms: float | None = None,
+) -> dict:
     return {
         "type": "coach_done",
         "session_id": session_id,
         "text": text,
         "provider": provider,
         "llm_ttft_ms": round(ttft_ms, 1),  # time to first token
-        "llm_total_ms": round(total_ms, 1),  # time to last token (includes forwarding deltas to the client)
+        "llm_total_ms": round(total_ms, 1),  # time to last token (includes forwarding deltas AND inline TTS to the client)
+        "tts_provider": tts_provider,
+        "first_sentence_ms": _round_or_none(first_sentence_ms),  # turn start -> first complete sentence
+        "first_speak_ms": _round_or_none(first_speak_ms),  # turn start -> first speak message sent (None if nothing spoken)
     }
+
+
+def build_speak(session_id: str, chunk: SpokenChunk, provider: str, tts_ms: float | None) -> dict:
+    """One sentence to play. `audio_b64` is absent when the browser should speak `text` itself."""
+    message = {
+        "type": "speak",
+        "session_id": session_id,
+        "seq": chunk.seq,
+        "text": chunk.text,
+        "provider": provider,
+        "tts_ms": _round_or_none(tts_ms),  # None when the server did no synthesis (browser speech)
+    }
+    if chunk.audio is not None:
+        message["mime"] = chunk.mime
+        message["audio_b64"] = base64.b64encode(chunk.audio).decode("ascii")
+    return message
+
+
+def _round_or_none(value: float | None) -> float | None:
+    return None if value is None else round(value, 1)
 
 
 def build_summary(session_id: str, text: str, provider: str, ttft_ms: float | None, total_ms: float | None) -> dict:

@@ -24,7 +24,7 @@
 </head>
 <body>
 <h1>Voice Coach</h1>
-<p>M2: pick a topic, start, answer by voice, and the coach replies with a follow-up.</p>
+<p>M3: pick a topic, start, answer by voice, and the coach replies with a follow-up and speaks it.</p>
 <div id="setup">
   <input id="topic" value="Python basics" maxlength="80" aria-label="Topic">
   <select id="difficulty" aria-label="Difficulty">
@@ -94,8 +94,73 @@ function refresh() {
   endBtn.disabled = !(connected && (state === 'listening' || state === 'paused') && !recording && !busy);
 }
 
-function showProvider(provider) {
-  if (provider === 'fake') warnEl.textContent = 'FAKE provider: placeholder text, not real speech recognition or coaching.';
+// One warning per stage, so a fake ASR and a real LLM (or the other way round) are each labelled correctly.
+const warnings = new Map();
+const FAKE_TEXT = {
+  asr: 'FAKE speech recognition: placeholder text, not your words.',
+  llm: 'FAKE coach: placeholder text, not real coaching.',
+  tts: 'FAKE voice: a beep, not speech.',
+};
+function renderWarn() { warnEl.textContent = [...warnings.values()].join(' '); }
+function showProvider(kind, provider) {
+  if (provider === 'none') return; // no LLM call happened (empty summary): says nothing about the provider
+  if (provider === 'fake') warnings.set(kind, FAKE_TEXT[kind]); else warnings.delete(kind);
+  renderWarn();
+}
+
+// Speech: sentences arrive as `speak` messages and play strictly in order. Server audio (fake TTS) plays through <audio>;
+// provider 'browser' means the text is spoken here by speechSynthesis. `speechGen` invalidates callbacks of cancelled items.
+let speechQueue = [], speaking = false, speechGen = 0, awaitingFirstAudio = false;
+let currentAudio = null, currentUtterance = null; // Chrome can garbage-collect an utterance before it ends: keep a reference
+
+function enqueueSpeech(msg) {
+  if (!msg.audio_b64 && !('speechSynthesis' in window)) {
+    warnings.set('voice', 'This browser has no speech synthesis: text only.');
+    renderWarn();
+    return;
+  }
+  speechQueue.push(msg);
+  if (!speaking) playNext();
+}
+
+function markAudible() { // the first sound after a stop press: report the browser-clock latency once
+  if (!awaitingFirstAudio) return;
+  awaitingFirstAudio = false;
+  const ms = Math.round(performance.now() - stopPressedAt);
+  timingEl.textContent += ` | stop->audio ${ms} ms (browser clock)`;
+  ws.send(JSON.stringify({ type: 'playback_started', stop_to_audio_ms: ms }));
+}
+
+function playNext() {
+  const msg = speechQueue.shift();
+  if (!msg) { speaking = false; return; }
+  speaking = true;
+  const gen = speechGen;
+  const next = () => { if (gen === speechGen) playNext(); };
+  if (msg.audio_b64) {
+    currentAudio = new Audio(`data:${msg.mime};base64,${msg.audio_b64}`);
+    currentAudio.onplaying = () => { if (gen === speechGen) markAudible(); };
+    currentAudio.onended = next;
+    currentAudio.onerror = next;
+    currentAudio.play().catch((err) => { addLine(`audio blocked: ${err.name}`, 'error'); next(); });
+  } else {
+    currentUtterance = new SpeechSynthesisUtterance(msg.text);
+    currentUtterance.lang = 'en-US';
+    currentUtterance.onstart = () => { if (gen === speechGen) markAudible(); };
+    currentUtterance.onend = next;
+    currentUtterance.onerror = next;
+    speechSynthesis.speak(currentUtterance);
+  }
+}
+
+function cancelSpeech() {
+  speechGen++; // callbacks from the item being cancelled must not advance the queue
+  speechQueue = [];
+  speaking = false;
+  awaitingFirstAudio = false;
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  currentUtterance = null;
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
 }
 
 // Box-average downsample from the mic's native rate to 16 kHz, then Float32 [-1,1] -> Int16.
@@ -121,7 +186,7 @@ function connect() {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${scheme}://${location.host}/ws`);
   ws.onopen = () => { statusEl.textContent = 'connected'; connected = true; refresh(); };
-  ws.onclose = () => { statusEl.textContent = 'disconnected - reload the page'; connected = false; refresh(); };
+  ws.onclose = () => { statusEl.textContent = 'disconnected - reload the page'; connected = false; cancelSpeech(); refresh(); };
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === 'session') {
@@ -129,6 +194,7 @@ function connect() {
     } else if (msg.type === 'state') {
       state = msg.state;
       if (state === 'listening') busy = false;
+      if (state === 'paused' || state === 'ended' || state === 'idle') cancelSpeech();
       statusEl.textContent = `session ${msg.session_id.slice(0, 8)}: ${state}`;
       refresh();
     } else if (msg.type === 'transcript') {
@@ -137,8 +203,10 @@ function connect() {
       timingEl.textContent =
         `audio ${msg.audio_ms} ms | asr ${msg.asr_ms} ms | rtf ${msg.rtf} | ` +
         `stop->text ${roundTrip} ms (browser clock, includes network) | asr provider ${msg.provider}`;
-      warnEl.textContent = '';
-      showProvider(msg.provider);
+      showProvider('asr', msg.provider);
+    } else if (msg.type === 'speak') {
+      showProvider('tts', msg.provider);
+      enqueueSpeech(msg);
     } else if (msg.type === 'coach_delta') {
       if (!coachLine) coachLine = addLine('Coach: ', 'coach');
       coachLine.textContent += msg.text;
@@ -146,13 +214,19 @@ function connect() {
       if (!coachLine) coachLine = addLine('', 'coach');
       coachLine.textContent = `Coach: ${msg.text}`;
       coachLine = null;
-      timingEl.textContent += ` | llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms | llm provider ${msg.provider}`;
-      showProvider(msg.provider);
+      timingEl.textContent += ` | llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms | llm provider ${msg.provider}` +
+        ` | tts ${msg.tts_provider}: first sentence ${msg.first_sentence_ms} ms, first speak sent ${msg.first_speak_ms} ms (server, from turn start)`;
+      showProvider('llm', msg.provider);
     } else if (msg.type === 'summary') {
       summaryEl.textContent = `Summary (${msg.provider}):\n${msg.text}`;
-      showProvider(msg.provider);
+      showProvider('llm', msg.provider);
     } else if (msg.type === 'error') {
-      if (coachLine) { coachLine.remove(); coachLine = null; } // partial reply from a failed turn: discard
+      if (msg.reason === 'speech failed') { // only the voice failed: the reply keeps streaming as text, sentences already queued still play
+        addLine(`error: ${msg.reason}`, 'error');
+        return;
+      }
+      if (coachLine) { coachLine.remove(); coachLine = null; } // partial reply from a failed turn: discard text and queued speech
+      cancelSpeech();
       busy = false;
       addLine(`error: ${msg.reason}`, 'error');
       refresh();
@@ -161,6 +235,7 @@ function connect() {
 }
 
 async function startRecording() {
+  cancelSpeech(); // the mic would pick up the coach's voice from the speakers
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
   } catch (err) {
@@ -193,6 +268,7 @@ async function stopRecording() {
   stream.getTracks().forEach((t) => t.stop());
   await ctx.close();
   stopPressedAt = performance.now();
+  awaitingFirstAudio = true; // the next first sound is the reply to this answer
   ws.send(JSON.stringify({ type: 'utterance_end' }));
   toggle.textContent = 'Start recording';
   statusEl.textContent = 'transcribing…';
@@ -200,7 +276,8 @@ async function stopRecording() {
 
 toggle.onclick = () => (recording ? stopRecording() : startRecording());
 startBtn.onclick = () => {
-  list.textContent = ''; summaryEl.textContent = ''; timingEl.textContent = ''; warnEl.textContent = '';
+  cancelSpeech(); warnings.clear(); renderWarn();
+  list.textContent = ''; summaryEl.textContent = ''; timingEl.textContent = '';
   ws.send(JSON.stringify({ type: 'start', topic: $('topic').value, difficulty: $('difficulty').value }));
 };
 pauseBtn.onclick = () => ws.send(JSON.stringify({ type: 'pause' }));
