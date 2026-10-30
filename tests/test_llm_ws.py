@@ -130,7 +130,7 @@ def test_invalid_start_is_rejected_and_can_be_retried(llm):
 
 
 def test_opener_failure_returns_to_idle_and_can_retry(monkeypatch):
-    provider = RecordingLLM(fail_on=(1,))
+    provider = RecordingLLM(fail_on=(1, 2))  # M4 retries once before the first piece, so the failure must outlast the retry
     monkeypatch.setattr("backend.main.get_llm_provider", lambda: provider)
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -142,7 +142,7 @@ def test_opener_failure_returns_to_idle_and_can_retry(monkeypatch):
 
 
 def test_mid_conversation_failure_rolls_back_and_retry_works(monkeypatch):
-    provider = RecordingLLM(fail_on=(2,))
+    provider = RecordingLLM(fail_on=(2, 3))  # the answer's first try and its one retry both fail (M4 retry)
     monkeypatch.setattr("backend.main.get_llm_provider", lambda: provider)
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
@@ -152,7 +152,7 @@ def test_mid_conversation_failure_rolls_back_and_retry_works(monkeypatch):
         speak(ws)  # user answers again
         done = next(m for m in read_until(ws, "state", state="listening") if m["type"] == "coach_done")
         assert done["text"].startswith("Fake question 2")  # the failed answer was not kept
-    assert [m.role for m in provider.calls[2]] == ["system", "user", "assistant", "user"]
+    assert [m.role for m in provider.calls[3]] == ["system", "user", "assistant", "user"]  # call 4: the second answer
 
 
 def test_llm_unavailable_at_connect_reports_and_closes(monkeypatch):

@@ -70,6 +70,15 @@ class InterviewSession:
     def fail_turn(self) -> None:
         """thinking -> listening (or idle if the opener failed). Drops the unanswered user message so roles still alternate."""
         self._require(State.THINKING, event="fail a turn")
+        self._roll_back_turn()
+
+    def cancel_turn(self) -> None:
+        """Same rollback as fail_turn, for a turn the user (pause/end) or a disconnect interrupted. Callers check the state first:
+        a turn that already finished is LISTENING and must keep its reply."""
+        self._require(State.THINKING, event="cancel a turn")
+        self._roll_back_turn()
+
+    def _roll_back_turn(self) -> None:
         if not self._history:
             self.state = State.IDLE
             return

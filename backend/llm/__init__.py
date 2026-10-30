@@ -10,7 +10,7 @@ def get_llm_provider() -> LLMProvider:
     """Pick the provider from LLM_PROVIDER (default: fake, so demo mode needs no key)."""
     choice = os.environ.get("LLM_PROVIDER", "fake")
     if choice == "fake":
-        return FakeLLM()
+        return FakeLLM(delay_s=float(os.environ.get("FAKE_LLM_DELAY_S", "0")))  # per piece; lets you watch Pause / End cancel a slow reply
     if choice == "gemini":
         from backend.llm.gemini import GeminiLLM
 

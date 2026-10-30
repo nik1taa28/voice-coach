@@ -37,7 +37,7 @@ flowchart LR
 | `LLMProvider` interface, `FakeLLM`, `prompts.py` (M2 piece 1) | Verified | `tests/test_llm.py`; the fake labels itself and its summary as fake |
 | `InterviewSession` state machine (M2 piece 1) | Verified | `tests/test_state.py`; pure, not yet wired to `/ws` |
 | `GeminiLLM` streaming (M2 piece 2) | Verified | mocked-HTTP tests (`tests/test_gemini.py`) plus one real call by hand: `gemini-2.5-flash` accepted, reply arrived in 2 pieces |
-| WS wiring: start/pause/resume/end, `coach_delta`, TTFT + total timing, summary (M2 piece 3) | Verified (fake LLM only) | `tests/test_llm_ws.py`; pause/end during a turn wait until the turn finishes (inline await), M4 adds cancellation; a client disconnect mid-stream is not handled specially yet |
+| WS wiring: start/pause/resume/end, `coach_delta`, TTFT + total timing, summary (M2 piece 3) | Verified (fake LLM only) | `tests/test_llm_ws.py`; in M2/M3 pause/end waited for the turn to finish (inline await). **Superseded by M4**: they now cancel the turn (see the M4 rows). Two tests here were changed in M4 so their injected failure outlasts the retry |
 | Recording allowed in `idle` (M1 transcribe-only) and `listening` | Implemented | keeps M1 behaviour; rejected while paused/thinking/ended |
 | Frontend controls + transcript (M2 piece 4) | Verified (by hand, fake providers) | user-reported: start, opening question, one spoken answer, follow-up, end, summary all worked with the FAKE banner. Pause/resume in the browser **not reported**. `tests/test_frontend.py` only checks control ids |
 | Real Gemini latency (M2) | Partial | one sample: ttft 3129 ms, total 3283 ms (standalone script, opener prompt, user's machine and network). Distribution **pending** (M5). Not yet run through `/ws` in the browser, and pause/resume in the browser not reported |
@@ -45,13 +45,21 @@ flowchart LR
 | `TTSProvider`, `FakeTTS` (labelled beep), `BrowserTTS` (text only), `TTS_PROVIDER` selection (M3 piece 2) | Verified | `tests/test_tts.py` (9) |
 | WS wiring: `speak` per sentence, `first_sentence_ms` / `first_speak_ms`, one `speech failed` error per turn, `playback_started` (M3 piece 3) | Verified (tests, fake/scripted providers) | `tests/test_tts_ws.py` (14): order, speech starts before the LLM finishes, TTS failure keeps text and history, LLM failure mid-reply does not speak the tail |
 | Frontend speech queue, cancel rules, per-stage FAKE labels, browser-clock `stop->audio` (M3 piece 4) | Verified (by hand, one session each) | user-reported: fake beep heard, real browser voice heard, opener spoken without an extra click, voice cut off mid-sentence by Pause / Start recording, pause + resume worked. Browser: VS Code's built-in browser, user guessed Chromium ("chrome i guess"), **not confirmed**. Real Chrome, Safari, Firefox: **not tested** |
-| TTS runs inline in the LLM stream loop | Known limitation | a slow server-side TTS delays reading the next LLM piece, and `llm_total_ms` includes it. A queue + worker task would fix it but needs the cancellation design from M4 |
+| TTS runs inline in the LLM stream loop | Known limitation | a slow server-side TTS delays reading the next LLM piece, and `llm_total_ms` includes it. M4 added a per-sentence deadline (`TIMEOUT_TTS_S`) so it cannot hang forever, but it is still inline. A queue + worker task would fix the coupling; cancellation (M4) now makes that possible, no stated need yet |
 | Streaming claim (M3) | Stated precisely | LLM -> splitter -> TTS dispatch is per piece / per sentence. Each TTS call waits for one **complete sentence**; not token-level TTS. ASR still waits for the full utterance |
 | Spoken summary | Not done | the end summary is text only |
 | Piper (server-side TTS) | Not planned for M3 | the interface allows it later (`SpokenChunk.audio` carries bytes) |
 | Real Whisper + Gemini + voice through the whole pipeline | Pending | the only M3 pipeline samples used the fake ASR and LLM (see budget table) |
 | Latency budget (M3) | Partial | table below: two single samples with fake upstream stages; real numbers **pending** |
-| Reliability (M4) | Planned | ASR runs while the session is not reading its socket; revisit for cancellation |
+| Deadlines per stage (`Timeouts`, `with_deadline`, `StageTimeout`) (M4 piece 1) | Verified | `tests/test_reliability.py`; values are env-overridable starting guesses, not measurements |
+| LLM retry once, only before the first piece (`stream_with_retry`) (M4 piece 1) | Verified | `tests/test_reliability.py`, `tests/test_cancel_ws.py`; a permanent error (bad key) is retried too and costs 0.3 s |
+| `TurnRunner`, `InterviewSession.cancel_turn` (M4 pieces 1-2) | Verified | unit tests |
+| Turn task + `SafeSender` + disconnect cleanup in `main.py` (M4 piece 3) | Verified (tests, TestClient, fake providers) | `tests/test_cancel_ws.py` (14): pause/end mid-reply, pause during ASR, busy, hung LLM/ASR/TTS/summary, flaky LLM, unexpected error, disconnect releases the LLM stream |
+| Pause / End buttons enabled while thinking (M4) | Implemented | `frontend/index.html` `refresh()`; `tests/test_frontend.py` only checks control ids |
+| Real uvicorn run of M4, fake providers, `FAKE_LLM_DELAY_S=1` (Pause during a slow reply; close the tab mid-reply) | Verified (by hand, one session, user-reported) | Pause mid-reply: the beep stopped and an `error: turn cancelled` line appeared. Resume then a new answer: normal reply. Closing the tab mid-reply: the server logged `disconnected`. **Not reported:** whether the partial coach line disappeared, whether the status read `paused`, and whether the log had a traceback or a `client gone` line. Browser not recorded. Real Gemini/Whisper through the task path: **pending** |
+| Whisper worker thread cannot be cancelled | Known limitation | an ASR timeout abandons the result, but the thread keeps using CPU until it finishes; audio is capped at 60 s. Real fix = a subprocess, out of scope |
+| No fallback provider (e.g. LLM -> second LLM, server TTS -> browser) | Not done | the only "fallbacks" are: retry once (LLM), text-only reply (TTS failure) |
+| Cross-session limits, queueing under load | Not done | belongs to M5 (load test) |
 | Logs / metrics / load test (M5) | Planned | |
 | Docker / CI (M6) | Planned | CI must install `requirements-asr.txt` for `tests/test_whisper.py` (needs numpy) |
 
@@ -79,6 +87,8 @@ Server -> client:
 Client -> server (M3): `{"type":"playback_started","stop_to_audio_ms":<0..600000>}`, sent once per answer when sound actually starts. Measured on the **browser** clock (stop press -> first audible sound); the server only logs it and never subtracts it from server timings. No reply on success; invalid values get an `error`.
 
 Error reasons: `invalid JSON`, `JSON must be an object`, `audio received before utterance_start`, `utterance_end without utterance_start`, `no audio received`, `PCM16 data must have an even number of bytes`, `sample_rate must be 16000`, `utterance already in progress; ...`, `utterance longer than 60s` (sent once, further frames dropped until `utterance_end`), `transcription failed`, `coach reply failed`, `summary failed`, `LLM unavailable: ...` (connection then closes), `cannot <event> while <state>`, `empty answer`, `no speech recognized, please try again`, topic/difficulty validation messages, `speech failed` (sent once per turn; the text and history are unaffected and sentences already queued still play), `stop_to_audio_ms must be a number between 0 and 600000`.
+
+Added in M4: `transcription timed out`, `coach reply timed out`, `summary timed out`, `turn cancelled` (Pause/End interrupted a running turn; the client discards partial text and queued speech, like for `coach reply failed`), `internal error` (an unexpected exception inside a turn; logged with a traceback; the session stays usable), `busy: the previous request is still being processed` (a second utterance or `start` while ASR or a turn is running). A cancelled opener returns the session to `idle`, so Pause then also reports `cannot pause while idle`, preceded by a `state` message.
 
 ## Reply path and latency budget (M3)
 
@@ -110,3 +120,37 @@ Reading the table:
 - `llm_total_ms` (18.3 vs 0.9 ms) differs between the columns by about the fake TTS cost. This is consistent with TTS running inline in the stream loop, but it compares two different runs and is **not** an isolated measurement.
 - With ASR and LLM at about 0 ms, the 52 / 69 ms in the last row is browser-side start-up (audio element or speech engine) plus a few ms of localhost. It says nothing about the real total.
 - The first sound waits for the first *complete sentence*, so with a real LLM the budget is dominated by ASR + LLM TTFT + time to finish sentence 1. Targets are not set until real numbers exist (M5).
+
+## Reliability (M4)
+
+```mermaid
+flowchart TD
+  subgraph Reader["receive loop (always reading)"]
+    R[receive frame] --> D{message}
+    D -- "start / utterance_end" --> T1[TurnRunner.start]
+    D -- "pause / end" --> I[interrupt: cancel task,<br/>cancel_turn if THINKING]
+    D -- "disconnect" --> F[finally: cancel task, discard buffer]
+  end
+  subgraph Turn["turn task (one per session)"]
+    A[ASR<br/>with_deadline] --> L[stream_with_retry<br/>first-piece + total deadline<br/>1 retry before any piece]
+    L --> S[per sentence TTS<br/>with_deadline]
+    S --> O[SafeSender: one lock,<br/>False on closed socket]
+  end
+  T1 --> A
+  I -. CancelledError .-> Turn
+  F -. CancelledError .-> Turn
+```
+
+| Failure | What happens | Retried? |
+|---|---|---|
+| ASR error / timeout | `transcription failed` / `transcription timed out`; state unchanged; user records again | no |
+| LLM error / timeout **before** the first piece | one retry after 0.3 s; invisible to the client if it works | yes (once) |
+| LLM error / timeout **after** the first piece | `coach reply failed` / `coach reply timed out`; `fail_turn` rollback | no (would repeat text already shown) |
+| TTS error / timeout | `speech failed` once; rest of the reply is text only | no |
+| Summary error / timeout | `summary failed` / `summary timed out`; the session is already `ended` | once, before any output (same rule) |
+| Pause / End during a turn | task cancelled, `turn cancelled`, unanswered message dropped, then the event applies | n/a |
+| Pause / End while `ended` | rejected; the summary task is left running | n/a |
+| Client disconnect | `finally` cancels the task; the LLM HTTP stream is closed | n/a |
+| Unexpected exception in a turn | `internal error`, logged with traceback, rollback, session usable | no |
+
+Default deadlines (guesses, env-overridable; only real sample so far: Gemini TTFT 3129 ms once): ASR 30 s, LLM first piece 10 s, LLM total 30 s, TTS 5 s per sentence, summary 30 s.

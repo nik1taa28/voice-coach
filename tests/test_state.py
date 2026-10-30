@@ -88,3 +88,48 @@ def test_history_property_is_a_copy():
     s = started()
     s.history.append(Message("user", "sneaky"))
     assert len(s.history) == 1
+
+
+def test_cancel_turn_drops_unanswered_user_message_and_allows_pause():
+    s = started()
+    s.add_user("my answer")
+    s.cancel_turn()
+    assert s.state is State.LISTENING
+    assert [m.role for m in s.history] == ["assistant"]
+    s.pause()  # what main.py does for Pause during a turn: cancel, then pause
+    assert s.state is State.PAUSED
+
+
+def test_cancel_turn_then_end_keeps_only_complete_exchanges():
+    s = started()
+    s.add_user("first")
+    s.add_coach("follow-up")
+    s.add_user("second, interrupted")
+    s.cancel_turn()
+    s.end()
+    assert [m.text for m in s.history] == ["What is a list?", "first", "follow-up"]
+    assert s.state is State.ENDED
+
+
+def test_cancel_turn_on_opener_returns_to_idle_and_pause_is_then_rejected():
+    s = InterviewSession()
+    s.start("Python", "easy")
+    s.cancel_turn()
+    assert s.state is State.IDLE
+    with pytest.raises(SessionError, match="cannot pause while idle"):
+        s.pause()
+
+
+@pytest.mark.parametrize("make_state", ["idle", "listening", "paused", "ended"])
+def test_cancel_turn_rejected_unless_thinking(make_state):
+    s = InterviewSession()
+    if make_state != "idle":
+        s = started()
+    if make_state == "paused":
+        s.pause()
+    if make_state == "ended":
+        s.end()
+    before = (s.state, s.history)
+    with pytest.raises(SessionError, match="cannot cancel a turn"):
+        s.cancel_turn()
+    assert (s.state, s.history) == before  # a finished reply is never discarded by a late cancel

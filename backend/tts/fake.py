@@ -31,13 +31,16 @@ class FakeTTS:
 
     name = "fake"
 
-    def __init__(self, delay_s: float = 0.0, fail_on_seq: int | None = None) -> None:
+    def __init__(self, delay_s: float = 0.0, fail_on_seq: int | None = None, hang_on_seq: int | None = None) -> None:
         self.delay_s = delay_s  # simulates slow synthesis
         self.fail_on_seq = fail_on_seq  # raise TTSError for that sentence only (0 = the first)
+        self.hang_on_seq = hang_on_seq  # never return for that sentence
 
     async def synthesize(self, text: str, seq: int) -> SpokenChunk:
         if self.fail_on_seq == seq:
             raise TTSError(f"fake TTS configured to fail on sentence {seq}")
+        if self.hang_on_seq == seq:
+            await asyncio.Event().wait()
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
         duration_ms = min(MAX_MS, max(MIN_MS, MS_PER_CHAR * len(text)))

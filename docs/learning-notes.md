@@ -275,3 +275,80 @@ These are an overhead floor with fake upstream stages, not the pipeline latency.
 - This project has no async pytest plugin, so async tests are wrapped in `asyncio.run`, as in `tests/test_llm.py`. My first TTS test file used `async def` tests and failed with "async def functions are not natively supported" until I switched pattern.
 - Chrome can garbage-collect a `SpeechSynthesisUtterance` before `onend` fires, so the page keeps a global reference.
 - `speechSynthesis.cancel()` fires `onend` / `onerror` for the cancelled item; a generation counter stops those late callbacks from advancing a cleared queue.
+
+## M4: Reliability (deadlines, cancellation, safe retry, cleanup)
+
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant R as receive loop
+  participant T as turn task
+  participant L as LLM
+  B->>R: utterance_end
+  R->>T: TurnRunner.start (loop keeps reading)
+  T->>L: stream (first-piece + total deadline)
+  L-->>T: piece 1, piece 2
+  T-->>B: coach_delta x2
+  B->>R: pause
+  R->>T: cancel() -> CancelledError at the await
+  Note over T,L: stream closed (aclose), no orphan HTTP call
+  R->>R: session.cancel_turn() (drop unanswered user msg)
+  R-->>B: error "turn cancelled", then state paused
+```
+
+```mermaid
+flowchart TD
+  F[LLM stream fails or stalls] --> Q{any piece produced yet?}
+  Q -- no --> W[wait 0.3 s, try once more] --> Q2{second try ok?}
+  Q2 -- yes --> OK[client never knew]
+  Q2 -- no --> E[coach reply failed / timed out]
+  Q -- yes --> E
+```
+
+- **Why it was needed:** the receive loop awaited the whole turn, so while Whisper or Gemini worked, the server could not read Pause, End, or the disconnect. A stuck provider froze the session.
+- **Fix:** the turn runs as a separate task (`TurnRunner`, one per session). The loop only reads and dispatches. Pause/End/disconnect call `task.cancel()`; `CancelledError` unwinds through `finally` blocks, so streams are closed.
+- **Deadlines:** `asyncio.timeout` wrapped in `with_deadline`, raising our own `StageTimeout(stage)`. It checks `expired()` so a `TimeoutError` from inside the awaited code is not mislabelled as our deadline.
+- **Retry rule:** repeat only what is safe to repeat. Before the first piece, nothing has reached the client and no history was written, so one retry is invisible. After the first piece a retry would send the first words twice, so we fail instead. The rule is in `stream_with_retry`, not inside Gemini, so fakes and real providers share it.
+- **Rollback guard:** `interrupt()` calls `cancel_turn()` only when the state is `thinking`. A reply that just finished is `listening` and keeps its text. A cancel during ASR is also `listening`: nothing was added yet.
+- **SafeSender:** one lock for all sends, and a closed socket returns `False` instead of raising, so a turn racing a disconnect ends quietly.
+- **One broad `except Exception`:** only at the task boundary (`guarded`). Nobody awaits the task, so an unexpected exception would vanish; it is logged with its traceback and the client gets `internal error`. `CancelledError` is a `BaseException` and passes through.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Long work | background task per turn, loop keeps reading | keep inline, add a "cancel" flag polled between awaits | tasks cancel at any `await`, flags only where we remembered to look; cost: more concurrency to reason about (sends, state races) |
+| Where retry lives | `stream_with_retry` in `reliability.py` | inside `GeminiLLM` | one policy, testable with fakes; cannot see error type, so a permanent error (bad key) is retried too (0.3 s wasted) |
+| Retry limit | once, before the first piece | exponential backoff, several tries | bounded added latency (about 0.3 s plus a second attempt); gives up on longer outages |
+| Pause during a turn | cancel + rollback, then pause | wait for the turn to finish (M2/M3) | user is in control at once; the interrupted answer is lost and must be repeated |
+| `cancel_turn` | separate pure method, `main.py` orchestrates | let `pause()` / `end()` accept `thinking` | rollback is one tested method; `pause()` / `end()` stay strict |
+| Second request while busy | `busy` error | queue it | simple, no hidden queue; the client must wait |
+| Timeout values | env-overridable guesses | hard-coded | tests use 0.05 s; real values wait for M5 data |
+| Reply to a cancelled turn | reuse the "any error discards partial text and queued speech" rule | new message type | no frontend protocol change; the reason text carries the meaning |
+| Frontend | Pause/End enabled while thinking | unchanged | without this the server capability was unreachable from the UI (found by reading `refresh()`) |
+
+### Verified so far
+- 148 tests pass (`.venv/bin/python -m pytest -q`, run in this session): 20 in `test_reliability.py`, 14 in `test_cancel_ws.py`, 7 new state cases, plus the earlier suite.
+- **Pending:** a real `uvicorn` run (close the tab mid-reply, Pause during a slow reply in the browser), real Gemini/Whisper through the new task path, and any measured timeout values.
+- **Not done:** fallback providers (second LLM, server TTS -> browser), killing a Whisper thread, limits across sessions (M5).
+
+**Key concept:** cancellation is cooperative. `task.cancel()` raises `CancelledError` at the task's next `await`; `finally` and `async with` then clean up. Code that never awaits (a blocking call, a worker thread) cannot be cancelled: that is why a Whisper timeout abandons the result but the thread keeps running.
+
+**Interview question:** How do you decide what is safe to retry in a streaming pipeline?
+*Short answer:* Retry only when repeating cannot be observed: no output has left the server and no state was written. Here that means a failure before the first LLM piece. After the first piece the client has already shown text, so a retry would duplicate it; I fail cleanly and roll the history back instead. Retries are bounded (once) and live in one place so they are testable.
+
+**Exercise:** `Timeouts.llm_total_s` covers LLM reading plus the inline TTS and sends. Set `TIMEOUT_TTS_S=4`, `TIMEOUT_LLM_TOTAL_S=5` and give `FakeTTS(delay_s=3)` a 3-sentence reply. Predict which deadline fires and what the client sees (hint: the deadlines nest, and TTS failures do not retry).
+
+**Common mistake:** adding a retry or a timeout and not checking old tests that rely on single failures. Two M2 tests injected one failure and waited for the error; with the retry the failure vanished and they hung in `receive_json` (the suite has no per-test timeout). Run with `-o faulthandler_timeout=15` to see which test is stuck.
+
+**Observed:**
+- I first named a fake counter `calls`; two test subclasses already used `calls` as a list, and 8 tests broke with a confusing `TypeError`. Grep for an attribute name before adding it to a class that tests subclass.
+- `asyncio.wait({task})` is the way to wait for a cancelled task without swallowing our own cancellation; `await task` inside `except CancelledError` would.
+- TestClient runs the app in a separate thread with its own event loop, so a test that never receives an expected message blocks forever instead of failing.
+
+### M4 addendum: first real-server run
+By hand, user-reported, one session, fake providers, `FAKE_LLM_DELAY_S=1`:
+- Pause during a streaming reply: the beep stopped and an `error: turn cancelled` line appeared.
+- Resume, then a new answer: a normal reply.
+- Closing the tab mid-reply: the server logged `disconnected`.
+- **Not reported:** whether the partial coach line was removed, whether the status showed `paused`, and whether the server log contained a traceback or `client gone`. Browser not recorded. The "Pending" items under "Verified so far" above that are not listed here (real Gemini/Whisper, measured timeouts) are still pending.
+- What this adds over `TestClient`: the real uvicorn network layer accepted the cancel and the disconnect, which is what hid a bug in M1.

@@ -89,9 +89,10 @@ function addLine(text, cls) {
 function refresh() {
   startBtn.disabled = !(connected && state === 'idle');
   toggle.disabled = !(connected && state === 'listening' && (recording || !busy));
-  pauseBtn.disabled = !(connected && state === 'listening' && !recording && !busy);
+  // M4: the server cancels a running turn on Pause / End, so both stay available while it is thinking or processing audio.
+  pauseBtn.disabled = !(connected && (state === 'listening' || state === 'thinking') && !recording);
   resumeBtn.disabled = !(connected && state === 'paused');
-  endBtn.disabled = !(connected && (state === 'listening' || state === 'paused') && !recording && !busy);
+  endBtn.disabled = !(connected && (state === 'listening' || state === 'paused' || state === 'thinking') && !recording);
 }
 
 // One warning per stage, so a fake ASR and a real LLM (or the other way round) are each labelled correctly.
