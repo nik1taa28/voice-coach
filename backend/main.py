@@ -12,6 +12,8 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 from backend.asr import ASRError, get_asr_provider
 from backend.audio import AudioError, pcm16_duration_ms
 from backend.llm import LLMError, get_llm_provider
+from backend.logs import configure_logging, session_id_var
+from backend.metrics import Metrics
 from backend.prompts import build_messages, build_summary_messages
 from backend.reliability import StageTimeout, Timeouts, TurnRunner, stream_with_retry, with_deadline
 from backend.sentences import SentenceSplitter
@@ -30,12 +32,14 @@ from backend.sessions import (
 )
 from backend.tts import TTSError, get_tts_provider
 
-logging.basicConfig(level=logging.INFO)  # uvicorn only configures its own loggers; without this our INFO lines are hidden
+configure_logging()
 logger = logging.getLogger("voice_coach")
 app = FastAPI(title="Voice Coach")
+metrics = Metrics.from_env()  # one per process; looked up at call time, so tests can swap it with monkeypatch
 
 
 INDEX_HTML = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
+DASHBOARD_HTML = INDEX_HTML.with_name("dashboard.html")
 
 
 @app.get("/health")
@@ -46,6 +50,17 @@ async def health() -> dict:
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(INDEX_HTML)
+
+
+@app.get("/dashboard")
+async def dashboard() -> FileResponse:
+    return FileResponse(DASHBOARD_HTML)
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> dict:
+    # Open, no auth: fine for a local project, not for a public deployment.
+    return metrics.snapshot()
 
 
 class SafeSender:
@@ -74,7 +89,7 @@ class SafeSender:
 
     def _gone(self, message: dict) -> bool:
         if not self._logged_gone:  # once per session, not once per dropped message
-            logger.info("session %s: client gone, dropping %s", self._session_id, message.get("type"))
+            logger.info("client gone, dropping %s", message.get("type"))
             self._logged_gone = True
         return False
 
@@ -83,6 +98,7 @@ class SafeSender:
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     session_id = new_session_id()
+    session_id_var.set(session_id)  # every log line from this connection's tasks now carries the id
     send = SafeSender(websocket, session_id)
     asr = get_asr_provider()
     tts = get_tts_provider()
@@ -94,11 +110,11 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     try:
         llm = get_llm_provider()
     except LLMError as exc:  # e.g. LLM_PROVIDER=gemini without a key: tell the client, then hang up
-        logger.error("session %s: LLM unavailable: %s", session_id, exc)
+        logger.error("LLM unavailable: %s", exc)
         await send(build_error(session_id, f"LLM unavailable: {exc}"))
         await websocket.close(code=1011)
         return
-    logger.info("session %s connected (asr=%s, llm=%s, tts=%s)", session_id, asr.name, llm.name, tts.name)
+    logger.info("connected", extra={"fields": {"asr": asr.name, "llm": llm.name, "tts": tts.name}})
 
     async def send_state() -> None:
         await send(build_state(session_id, session.state.value))
@@ -113,7 +129,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         if session.state is State.THINKING:
             session.cancel_turn()
         if was_running:
-            logger.info("session %s: turn cancelled, state now %s", session_id, session.state.value)
+            metrics.count("turn_cancelled")
+            logger.info("turn cancelled", extra={"fields": {"state": session.state.value}})
             await send(build_error(session_id, "turn cancelled"))  # the client already discards partial text + queued speech on any error
 
     async def interrupt_then(event: Callable[[], None]) -> None:
@@ -140,7 +157,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         try:
             await coro
         except Exception:
-            logger.exception("session %s: unexpected error in %s", session_id, what)
+            logger.exception("unexpected error in %s", what)
+            metrics.count("turn_failed")
             if session.state is State.THINKING:
                 session.cancel_turn()
             await send(build_error(session_id, "internal error"))
@@ -153,11 +171,13 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         try:
             reply = await with_deadline(transcribe_timed(asr, session_id, pcm, rate), timeouts.asr_s, "asr")
         except ASRError:
-            logger.exception("session %s: ASR failed", session_id)
+            logger.exception("ASR failed")
+            metrics.count("turn_failed")
             await send(build_error(session_id, "transcription failed"))
             return
         except StageTimeout as exc:
-            logger.error("session %s: %s", session_id, exc)  # note: a Whisper worker thread cannot be killed and keeps running
+            logger.error("%s", exc)  # note: a Whisper worker thread cannot be killed and keeps running
+            metrics.count("turn_timeout")
             await send(build_error(session_id, "transcription timed out"))
             return
         await send(reply)
@@ -224,7 +244,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < 600_000:
                         await send(build_error(session_id, "stop_to_audio_ms must be a number between 0 and 600000"))
                     else:
-                        logger.info("session %s: browser stop_to_audio_ms=%.0f", session_id, value)
+                        logger.info("browser playback started", extra={"fields": {"stop_to_audio_ms": round(value)}})
                 else:
                     await send(build_echo(session_id, message))
             except (AudioError, SessionError) as exc:
@@ -233,7 +253,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         # Runs on disconnect, and also if this handler itself fails or is cancelled: no orphaned turn keeps calling providers.
         await turns.cancel()
         utterance.discard()
-        logger.info("session %s disconnected", session_id)
+        logger.info("disconnected")
 
 
 async def transcribe_timed(asr, session_id: str, pcm: bytes, sample_rate: int) -> dict:
@@ -242,7 +262,8 @@ async def transcribe_timed(asr, session_id: str, pcm: bytes, sample_rate: int) -
     started = time.perf_counter()
     transcript = await asr.transcribe(pcm, sample_rate)
     asr_ms = (time.perf_counter() - started) * 1000
-    logger.info("session %s: asr=%s audio_ms=%.0f asr_ms=%.0f", session_id, asr.name, audio_ms, asr_ms)
+    metrics.observe("asr", asr_ms)
+    logger.info("asr done", extra={"fields": {"asr": asr.name, "audio_ms": round(audio_ms), "asr_ms": round(asr_ms)}})
     return build_transcript(session_id, transcript, audio_ms, asr_ms)
 
 
@@ -272,11 +293,14 @@ async def coach_turn(send: SafeSender, session: InterviewSession, llm, tts, sess
             try:
                 chunk = await with_deadline(tts.synthesize(sentence, next_seq), timeouts.tts_s, "tts")
             except (TTSError, StageTimeout):
-                logger.exception("session %s: TTS failed on sentence %d", session_id, next_seq)
+                logger.exception("TTS failed on sentence %d", next_seq)
                 speech_failed = True
+                metrics.count("speech_failed")
                 await send(build_error(session_id, "speech failed"))
                 continue
             tts_ms = None if chunk.audio is None else (time.perf_counter() - started) * 1000  # browser speech: nothing to time
+            if tts_ms is not None:
+                metrics.observe("tts", tts_ms)
             await send(build_speak(session_id, chunk, tts.name, tts_ms))
             if first_speak_ms is None:
                 first_speak_ms = (time.perf_counter() - turn_started) * 1000
@@ -290,19 +314,29 @@ async def coach_turn(send: SafeSender, session: InterviewSession, llm, tts, sess
         result = await stream_with_retry(lambda: llm.stream(messages), timeouts.llm_first_s, timeouts.llm_total_s, on_piece)
         await speak_sentences(splitter.flush())  # the unterminated tail of the reply
     except (LLMError, StageTimeout) as exc:
-        logger.exception("session %s: LLM failed", session_id)
+        logger.exception("LLM failed")
         session.fail_turn()  # client may hold partial deltas and queued speech; the error tells it to discard both
-        reason = "coach reply timed out" if isinstance(exc, StageTimeout) else "coach reply failed"
+        timed_out = isinstance(exc, StageTimeout)
+        metrics.count("turn_timeout" if timed_out else "turn_failed")
+        reason = "coach reply timed out" if timed_out else "coach reply failed"
         await send(build_error(session_id, reason))
         await send(build_state(session_id, session.state.value))
         return
     text = result.text.strip()  # what the client shows and what history stores must be identical
     session.add_coach(text)
-    logger.info(
-        "session %s: llm=%s attempts=%d ttft_ms=%.0f total_ms=%.0f tts=%s first_sentence_ms=%s first_speak_ms=%s",
-        session_id, llm.name, result.attempts, result.ttft_ms, result.total_ms, tts.name,
-        None if first_sentence_ms is None else round(first_sentence_ms), None if first_speak_ms is None else round(first_speak_ms),
-    )
+    metrics.observe("llm_ttft", result.ttft_ms)
+    metrics.observe("llm_total", result.total_ms)
+    if first_sentence_ms is not None:
+        metrics.observe("first_sentence", first_sentence_ms)
+    if first_speak_ms is not None:
+        metrics.observe("first_speak", first_speak_ms)
+    metrics.count("turn_ok")
+    logger.info("coach turn done", extra={"fields": {
+        "llm": llm.name, "tts": tts.name, "attempts": result.attempts,
+        "ttft_ms": round(result.ttft_ms), "total_ms": round(result.total_ms),
+        "first_sentence_ms": None if first_sentence_ms is None else round(first_sentence_ms),
+        "first_speak_ms": None if first_speak_ms is None else round(first_speak_ms),
+    }})
     await send(build_coach_done(session_id, text, llm.name, result.ttft_ms, result.total_ms, tts.name, first_sentence_ms, first_speak_ms))
     await send(build_state(session_id, session.state.value))
 
@@ -316,8 +350,8 @@ async def send_summary(send: SafeSender, session: InterviewSession, llm, session
     try:
         result = await stream_with_retry(lambda: llm.stream(build_summary_messages(history)), timeouts.llm_first_s, timeouts.summary_s)
     except (LLMError, StageTimeout) as exc:
-        logger.exception("session %s: summary failed", session_id)
+        logger.exception("summary failed")
         await send(build_error(session_id, "summary timed out" if isinstance(exc, StageTimeout) else "summary failed"))
         return
-    logger.info("session %s: summary llm=%s attempts=%d total_ms=%.0f", session_id, llm.name, result.attempts, result.total_ms)
+    logger.info("summary done", extra={"fields": {"llm": llm.name, "attempts": result.attempts, "total_ms": round(result.total_ms)}})
     await send(build_summary(session_id, result.text, llm.name, result.ttft_ms, result.total_ms))

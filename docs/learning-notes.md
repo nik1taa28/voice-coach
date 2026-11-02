@@ -352,3 +352,62 @@ By hand, user-reported, one session, fake providers, `FAKE_LLM_DELAY_S=1`:
 - Closing the tab mid-reply: the server logged `disconnected`.
 - **Not reported:** whether the partial coach line was removed, whether the status showed `paused`, and whether the server log contained a traceback or `client gone`. Browser not recorded. The "Pending" items under "Verified so far" above that are not listed here (real Gemini/Whisper, measured timeouts) are still pending.
 - What this adds over `TestClient`: the real uvicorn network layer accepted the cancel and the disconnect, which is what hid a bug in M1.
+
+## M5: Observability (metrics, JSON logs, dashboard, load test)
+
+```mermaid
+flowchart LR
+  subgraph Server["FastAPI process"]
+    T[turn code] -- "observe(stage, ms)<br/>count(outcome)" --> M[(Metrics<br/>window per stage)]
+    T -- "logger + extra fields" --> F[handler filter adds session_id<br/>from a contextvar] --> J[JSON line on stderr]
+    M --> E[GET /metrics]
+  end
+  E --> D[GET /dashboard<br/>polls every 2 s]
+  LT[Locust users over /ws] --> T
+  LT -- "on stop: GET /metrics" --> R[loadtest/results] --> P[docs/performance.md]
+```
+
+```mermaid
+flowchart TD
+  Q["runner.quit(): kill each user, WAIT for it to die"] --> W{"user inside ws.close()?"}
+  W -- no --> OK[user ends]
+  W -- yes --> S["bare 'except: pass' in close()<br/>swallows GreenletExit"] --> N["user starts its next interview"] --> H["Locust waits forever"]
+```
+
+- A sample is a duration in ms from `perf_counter`. `Metrics` keeps the newest N per stage and sorts them only when `/metrics` is read. Percentile = nearest rank, so it is always a value that really happened.
+- `error_rate = (failed + timeout) / (ok + failed + timeout)`. A user's Pause is not an error, and a failed turn records no latency sample.
+- The session id lives in a `ContextVar`, set once per connection. Tasks copy the context when created, so code that knows nothing about sessions (the retry in `reliability.py`) still logs with the right id.
+- Every load-test step used a fresh server, because counters and the window are cumulative. The window had to be raised (`METRICS_WINDOW`): at 100 users the default 1000 samples covered only the last seconds of a step.
+- Measure first, explain second. Three results here looked wrong and were not what they seemed: a hang, "latency falls as users rise", and a 200-user step that was the load generator's limit.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Metrics store | hand-written, newest-N window, exact percentiles | `prometheus_client` histograms | explains p50/p95 exactly, no dependency; only a window, not scrapeable by Prometheus |
+| Session id in logs | contextvar + handler filter | `extra=` at every call | one place to set it, reaches every module; needs knowing how tasks copy context |
+| Log shape | fixed keys + a nested `fields` object | free-form extra keys | `fields` cannot overwrite `ts`/`level`/`msg`; one level of nesting |
+| Dashboard | table + stat tiles, polling `fetch` | charts, WebSocket push | exact values on very different scales, accessible, simple; no history or trend |
+| Load tool | Locust + `websocket-client` | k6 | same language; needs a WebSocket client and care with gevent (see below) |
+| Closing a load-test socket | `ws.shutdown()` | `ws.close()` | server sees an abrupt disconnect (same path as a closed tab); no handshake that can swallow a kill |
+| Server window for load tests | `METRICS_WINDOW` env, default 1000 | reset endpoint, per-step snapshots | one variable, `window` is reported in every snapshot; sorting a huge window costs more per scrape |
+| Load shape | closed loop, fresh server per step, 3 repeats, steps interleaved | open loop, one long run | simple and repeatable, spread is visible; latency at high users is capped by the user count |
+
+### Verified so far
+- 186 tests pass (`.venv/bin/python -m pytest -q`, run in this session): 18 metrics, 8 metrics-over-WebSocket, 8 logs, 4 dashboard, plus the earlier 148.
+- Real uvicorn run: the same `session_id` on every app log line. Dashboard: dark mode and the "cannot read /metrics" banner seen by hand.
+- Load tests (fake providers 1-100 users, real Whisper 1-32 users): numbers and caveats in `docs/performance.md`.
+- **Pending:** real Gemini under load (not planned), the whole real pipeline, other browsers, open-loop load, memory use, and the cause of the Whisper plateau (a guess only).
+
+**Key concept:** saturation. As load grows, throughput rises until a resource is full, then stops, and every extra user only adds waiting time. Real Whisper plateaued at about 4 answers per second; asr p50 went 242 ms (1 user) -> 674 ms (8) -> 2868 ms (16) -> 7167 ms (32) with no errors. One user's latency says nothing about the limit.
+
+**Interview question:** Your ASR takes 242 ms for a 7.9 s clip. How many users can you serve?
+*Short answer:* One user's latency is not capacity. I load-tested it: throughput stopped growing at about 4 answers per second (around 8 users), and past that latency grew with the number of users (asr p50 7.2 s at 32), with no failures because the 30 s deadline was never reached. The event loop stayed free (the other stages did not slow down), so the limit is the Whisper stage itself. My guess, not yet tested, is that it runs one transcription at a time; I would change that setting and rerun before claiming anything.
+
+**Exercise:** raise the number of Whisper workers (or `cpu_threads`) in `WhisperASR` and rerun 8 and 16 users. Predict first: where should the plateau move, and what would tell you the CPU itself, not the setting, is the limit?
+
+**Common mistake:** trusting a library call you did not read. `websocket-client`'s `close()` ends in `except: pass`, which also swallows cancellation (`GreenletExit`, like `CancelledError` in asyncio). A user killed inside `close()` kept running and Locust waited forever. Cancellation only works if nothing in the path catches it; read the `except` clauses of code that runs during cleanup.
+
+**Observed:**
+- Latency fell as users rose (1 user 15 ms server, 100 users 4.7 ms) in all 3 repeats. With two busy loops on other cores, the 1-user step also dropped to 5.0 ms. So the machine, not the app, explains it; the mechanism was not measured.
+- Locust printed `CPU usage above 90%` at 200 users. That step measured the load generator as much as the server, so it is not a capacity figure.
+- zsh treats a bare `======` word as a command; use a different separator in shell snippets.

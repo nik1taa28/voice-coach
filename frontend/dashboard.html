@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Coach metrics</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --surface: #ffffff; --ink: #1a1a1a; --ink-2: #4f4f55; --muted: #6a6a70; --line: #e2e2de;
+    --good: #0ca30c; --critical: #d03b3b; /* status steps: fixed, never themed */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121212; --surface: #1b1b1b; --ink: #ececec; --ink-2: #b4b4ba; --muted: #9a9aa0; --line: #2d2d2d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 32px 0 8px; }
+  #status { margin: 0; color: var(--muted); font-size: 13px; }
+  #status.bad { color: var(--ink); border-left: 3px solid var(--critical); padding-left: 8px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-top: 20px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .tile.hero { grid-column: 1 / -1; }
+  .label { color: var(--ink-2); font-size: 13px; }
+  .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .hero .value { font-size: 48px; }
+  .detail { color: var(--ink-2); font-size: 13px; min-height: 20px; }
+  .icon { font-weight: 700; margin-right: 4px; }
+  .icon.good { color: var(--good); }
+  .icon.bad { color: var(--critical); }
+  .scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 8px 14px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; }
+  th { font-weight: 600; color: var(--ink-2); font-size: 13px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td { font-variant-numeric: tabular-nums; }
+  td small { display: block; color: var(--muted); font-size: 12px; }
+  .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pipeline metrics</h1>
+  <p id="status" role="status">Connecting…</p>
+
+  <section class="kpis" aria-label="Headline numbers">
+    <div class="tile hero">
+      <div class="label">Error rate</div>
+      <div class="value" id="error-rate">–</div>
+      <div class="detail" id="error-detail">Waiting for data</div>
+    </div>
+    <div class="tile"><div class="label">Turns ok</div><div class="value" data-count="turn_ok">–</div></div>
+    <div class="tile"><div class="label">Turns failed</div><div class="value" data-count="turn_failed">–</div></div>
+    <div class="tile"><div class="label">Turns timed out</div><div class="value" data-count="turn_timeout">–</div></div>
+    <div class="tile"><div class="label">Turns cancelled</div><div class="value" data-count="turn_cancelled">–</div></div>
+    <div class="tile"><div class="label">Speech failures</div><div class="value" data-count="speech_failed">–</div></div>
+    <div class="tile"><div class="label">Rejected samples</div><div class="value" data-count="rejected_samples">–</div></div>
+  </section>
+
+  <h2>Latency per stage</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th scope="col">Stage</th><th scope="col">n</th><th scope="col">p50 (ms)</th><th scope="col">p95 (ms)</th></tr></thead>
+      <tbody>
+        <tr data-stage="asr"><th scope="row">Speech recognition<small>asr, from utterance end to transcript</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
+        <tr data-stage="llm_ttft"><th scope="row">LLM first piece<small>llm_ttft, includes a retry if one happened</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
+        <tr data-stage="llm_total"><th scope="row">LLM whole reply<small>llm_total, includes inline TTS and sends</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
+        <tr data-stage="first_sentence"><th scope="row">First sentence complete<small>first_sentence, from turn start</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
+        <tr data-stage="first_speak"><th scope="row">First speech message sent<small>first_speak, from turn start</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
+        <tr data-stage="tts"><th scope="row">Speech synthesis<small>tts, server voices only</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note" id="window-note">Exact nearest-rank percentiles over the most recent samples of each stage, for this server process only; a restart clears them.</p>
+  <p class="note">With fewer than 20 samples, p95 is simply the slowest sample. The browser-measured stop-to-sound time is not here: it is on another clock and only appears in the logs. Browser voices are not timed by the server, so Speech synthesis shows n = 0 for them. Cancelled turns (Pause / End) are not counted as errors.</p>
+</main>
+
+<script>
+const POLL_MS = 2000;
+const fmtInt = (v) => v.toLocaleString("en-US");
+const fmtMs = (v) => (v === null ? "–" : v < 10 ? v.toFixed(1) : fmtInt(Math.round(v)));
+
+function render(snap) {
+  for (const [stage, s] of Object.entries(snap.stages)) {
+    const row = document.querySelector(`[data-stage="${stage}"]`);
+    if (!row) { console.warn("dashboard has no row for stage", stage); continue; }
+    row.querySelector(".n").textContent = fmtInt(s.n);
+    row.querySelector(".p50").textContent = fmtMs(s.p50);
+    row.querySelector(".p95").textContent = fmtMs(s.p95);
+  }
+  for (const [name, value] of Object.entries(snap.counts)) {
+    const el = document.querySelector(`[data-count="${name}"]`);
+    if (el) el.textContent = fmtInt(value);
+  }
+  const failed = snap.counts.turn_failed + snap.counts.turn_timeout;
+  const finished = snap.counts.turn_ok + failed;
+  const rate = document.getElementById("error-rate");
+  const detail = document.getElementById("error-detail");
+  detail.replaceChildren();
+  if (snap.error_rate === null) {
+    rate.textContent = "–";
+    detail.textContent = "No finished turns yet";
+  } else {
+    rate.textContent = (snap.error_rate * 100).toFixed(1) + "%";
+    const icon = document.createElement("span");
+    icon.setAttribute("aria-hidden", "true");
+    icon.className = "icon " + (failed === 0 ? "good" : "bad");
+    icon.textContent = failed === 0 ? "✓" : "✕";
+    detail.append(icon, failed === 0
+      ? `No errors in ${fmtInt(finished)} finished turns`
+      : `${fmtInt(failed)} of ${fmtInt(finished)} finished turns failed or timed out`);
+  }
+  document.getElementById("window-note").firstChild.textContent =
+    `Exact nearest-rank percentiles over the most recent ${fmtInt(snap.window)} samples of each stage, for this server process only; a restart clears them.`;
+}
+
+function setStatus(text, bad) {
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.className = bad ? "bad" : "";
+}
+
+async function poll() {
+  try {
+    const res = await fetch("/metrics", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    render(await res.json());
+    setStatus(`Updated ${new Date().toLocaleTimeString()}, refreshing every ${POLL_MS / 1000} s`, false);
+  } catch (err) {
+    console.error(err);
+    setStatus(`Cannot read /metrics (${err.message}). Showing the last data; retrying.`, true);
+  } finally {
+    setTimeout(poll, POLL_MS); // next poll starts after this one ends, so slow replies never pile up
+  }
+}
+poll();
+</script>
+</body>
+</html>

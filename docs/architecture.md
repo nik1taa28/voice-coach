@@ -30,7 +30,7 @@ flowchart LR
 | Utterance protocol + per-chunk size cap + timing | Verified | `tests/test_asr_ws.py` |
 | Browser mic capture + 16 kHz resample (fake provider) | Verified (by hand) | user-reported working; `audio_ms` matched the time recorded |
 | `WhisperASR` (faster-whisper `tiny.en`, int8, CPU) | Verified | unit tests with a stub model; real model run by hand, transcript correct |
-| Whisper latency numbers | Partial | one cold call and one later call recorded (see `learning-notes.md`); distribution **pending** |
+| Whisper latency numbers | Partial | M1 single samples (see `learning-notes.md`); M5 added a load run, see `docs/performance.md`: warm one-user decode 242 ms for 7.9 s of synthetic speech, cold first transcription 788-898 ms, throughput plateau about 4 answers/s |
 | Streaming ASR | Not planned for M1 | ASR waits for the complete utterance; audio is streamed *in*, text is not streamed *out* |
 | Tail of audio (< ~43 ms) dropped at stop | Known limitation | worklet buffer is not flushed on stop |
 | `.env` auto-loading | Planned | env vars must be exported in the shell for now |
@@ -59,8 +59,13 @@ flowchart LR
 | Real uvicorn run of M4, fake providers, `FAKE_LLM_DELAY_S=1` (Pause during a slow reply; close the tab mid-reply) | Verified (by hand, one session, user-reported) | Pause mid-reply: the beep stopped and an `error: turn cancelled` line appeared. Resume then a new answer: normal reply. Closing the tab mid-reply: the server logged `disconnected`. **Not reported:** whether the partial coach line disappeared, whether the status read `paused`, and whether the log had a traceback or a `client gone` line. Browser not recorded. Real Gemini/Whisper through the task path: **pending** |
 | Whisper worker thread cannot be cancelled | Known limitation | an ASR timeout abandons the result, but the thread keeps using CPU until it finishes; audio is capped at 60 s. Real fix = a subprocess, out of scope |
 | No fallback provider (e.g. LLM -> second LLM, server TTS -> browser) | Not done | the only "fallbacks" are: retry once (LLM), text-only reply (TTS failure) |
-| Cross-session limits, queueing under load | Not done | belongs to M5 (load test) |
-| Logs / metrics / load test (M5) | Planned | |
+| Cross-session limits, queueing under load | Measured, not implemented | under real Whisper, throughput plateaus at about 4 answers/s and asr p50 grows 674 ms (8 users) -> 7167 ms (32 users) with 0 failures and no timeouts (`docs/performance.md`). There is still no limit or queue policy in the app |
+| `Metrics` registry (p50/p95 per stage, outcome counters) and `GET /metrics` (M5 pieces 1-2) | Verified (tests) | `tests/test_metrics.py` (12), `tests/test_metrics_ws.py` (8); **uncommitted**. Window = newest 1000 samples per stage. `/metrics` is open, no auth. Summary failures are not counted in `error_rate`. A failed turn records no latency sample |
+| JSON logs with `session_id` via contextvar (M5 piece 3) | Verified (tests + by hand) | `tests/test_logs.py` (8). Real uvicorn run (fake providers): the same `session_id` on every `voice_coach` line. uvicorn's own lines stay plain text and carry no id |
+| `GET /dashboard` (M5 piece 4) | Verified (tests); by hand partly | `tests/test_dashboard.py` (4). By hand: dark mode fine, the "cannot read /metrics" banner appears when the server stops. The `asr` row filling on screen after a spoken answer: not confirmed |
+| Load test: Locust + `loadtest/sweep.sh` + `warmup.py` + `summarize.py` (M5 piece 5) | Verified (by running) | fake providers 1/10/50/100 users x 3 repeats, 0 failures; real Whisper 1-32 users, 0 failures. Load generator on the same laptop. The earlier 100-user shutdown hang was a test-tool bug (`ws.close()` swallows Locust's kill; fixed with `ws.shutdown()`); 24 of 24 runs since exited by themselves. Real Gemini under load: not planned. Whole real pipeline under load: pending |
+| Baseline report `docs/performance.md` and M5 learning notes (M5 piece 6) | Implemented | measured numbers only; open items listed in the report. `METRICS_WINDOW` (env, default 1000) lets a load test keep every sample of a step |
+| Curated question bank (JSON: topic, difficulty, key points; the LLM writes only follow-ups and feedback) | Planned (after M6) | not built; the opener is currently written by the LLM. Stretch after that: delivery feedback from measurable signals only (words per minute, fillers, pauses, length) |
 | Docker / CI (M6) | Planned | CI must install `requirements-asr.txt` for `tests/test_whisper.py` (needs numpy) |
 
 ## WebSocket message protocol

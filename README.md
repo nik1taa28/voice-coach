@@ -61,7 +61,7 @@ Full detail, protocol and per-part status (Planned / Implemented / Verified): [d
 .venv/bin/python -m pytest -q
 ```
 
-148 tests pass at the time of writing (unit tests, plus WebSocket tests using slow and failing fakes: hung or flaky LLM, hung ASR/TTS, Pause/End mid-reply, disconnect). Note that `tests/test_whisper.py` needs numpy, which comes with `requirements-asr.txt`. The suite has no per-test timeout; if one hangs, run it with `-o faulthandler_timeout=15` to see where.
+186 tests pass at the time of writing (M5 added metrics, logging and dashboard tests) (unit tests, plus WebSocket tests using slow and failing fakes: hung or flaky LLM, hung ASR/TTS, Pause/End mid-reply, disconnect). Note that `tests/test_whisper.py` needs numpy, which comes with `requirements-asr.txt`. The suite has no per-test timeout; if one hangs, run it with `-o faulthandler_timeout=15` to see where.
 
 ## Measured so far (honest numbers)
 

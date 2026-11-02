@@ -1,0 +1,3 @@
+# Load testing only (M5). Not needed to run or unit-test the app.
+locust  # load generator: runs many virtual users and prints p50/p95 per request name
+websocket-client  # Locust has no WebSocket support; this is a plain blocking client that works under its gevent loop
