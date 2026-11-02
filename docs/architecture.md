@@ -66,7 +66,10 @@ flowchart LR
 | Load test: Locust + `loadtest/sweep.sh` + `warmup.py` + `summarize.py` (M5 piece 5) | Verified (by running) | fake providers 1/10/50/100 users x 3 repeats, 0 failures; real Whisper 1-32 users, 0 failures. Load generator on the same laptop. The earlier 100-user shutdown hang was a test-tool bug (`ws.close()` swallows Locust's kill; fixed with `ws.shutdown()`); 24 of 24 runs since exited by themselves. Real Gemini under load: not planned. Whole real pipeline under load: pending |
 | Baseline report `docs/performance.md` and M5 learning notes (M5 piece 6) | Implemented | measured numbers only; open items listed in the report. `METRICS_WINDOW` (env, default 1000) lets a load test keep every sample of a step |
 | Curated question bank (JSON: topic, difficulty, key points; the LLM writes only follow-ups and feedback) | Planned (after M6) | not built; the opener is currently written by the LLM. Stretch after that: delivery feedback from measurable signals only (words per minute, fillers, pauses, length) |
-| Docker / CI (M6) | Planned | CI must install `requirements-asr.txt` for `tests/test_whisper.py` (needs numpy) |
+| Demo mode from a clean environment (M6) | Verified (by running) | a fresh virtual environment with only `requirements.txt`: `faster_whisper` not importable, app starts, `/health`, `/`, `/metrics`, `/dashboard` return 200, a WebSocket opener finishes with fake providers. This is the closest local stand-in for the container |
+| `Dockerfile`, `.dockerignore` (M6) | Implemented, **not built** | the Docker CLI is installed but no daemon was running. python:3.13-slim, non-root user, `HEALTHCHECK` on `/health`, demo mode by default, optional `--build-arg WITH_ASR=1`. Build and run: pending (commands in `docs/PROJECT_BRIEF.md`) |
+| `.github/workflows/ci.yml` (M6) | Implemented; recipe verified locally; **not run on GitHub** | the YAML parses (2 jobs: `test`, `docker`). The `test` job's install and pytest steps were run in a clean virtual environment: 186 passed. Action versions (`checkout@v4`, `setup-python@v5`) not checked against current releases. The load test is not part of CI |
+| `pytest` listed in `requirements.txt` | Known imperfection | it is installed in the image although the app does not need it; splitting it out was not worth a new file yet |
 
 ## WebSocket message protocol
 

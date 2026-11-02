@@ -61,20 +61,40 @@ Full detail, protocol and per-part status (Planned / Implemented / Verified): [d
 .venv/bin/python -m pytest -q
 ```
 
-186 tests pass at the time of writing (M5 added metrics, logging and dashboard tests) (unit tests, plus WebSocket tests using slow and failing fakes: hung or flaky LLM, hung ASR/TTS, Pause/End mid-reply, disconnect). Note that `tests/test_whisper.py` needs numpy, which comes with `requirements-asr.txt`. The suite has no per-test timeout; if one hangs, run it with `-o faulthandler_timeout=15` to see where.
+186 tests pass at the time of writing: unit tests, plus WebSocket tests using slow and failing fakes (hung or flaky LLM, hung ASR/TTS, Pause/End mid-reply, disconnect), and the metrics, logging and dashboard tests added in M5. The same suite passed in a clean virtual environment built the way CI builds it (186 passed). Note that `tests/test_whisper.py` needs numpy, which comes with `requirements-asr.txt`. The suite has no per-test timeout; if one hangs, run it with `-o faulthandler_timeout=15` to see where.
 
-## Measured so far (honest numbers)
+## Measured (honest numbers)
 
-These are **single samples on one laptop, not distributions**. Hardware was not recorded. A proper p50/p95 baseline is planned for M5.
+All numbers are from one Apple M3 laptop (8 cores, 16 GB), with the load generator on the same machine, so they show relative behaviour, not what a dedicated server would do. Full tables, setup and caveats: [docs/performance.md](docs/performance.md).
 
-| What | Sample |
+| What | Result |
 |---|---|
-| Whisper `tiny.en`, warm call | 987.6 ms for 7.3 s of audio (rtf 0.135) |
-| Whisper, first ever call (model download + load included) | 20951 ms |
-| Gemini `gemini-2.5-flash`, opener, TTFT / total | 3129 ms / 3283 ms |
-| Stop press to first sound, fake ASR + fake LLM (overhead floor only) | 52 ms (fake voice), 69 ms (browser voice) |
+| Fake providers, 1 to 100 virtual users, 3 repeats each | 0 failures; throughput grows about linearly to 336-338 req/s; no saturation found. Server stage time at 100 users: `llm_total` p50 4.7-4.8 ms, p95 5.0-5.1 ms (mostly the fake TTS) |
+| Real faster-whisper `tiny.en`, 1 to 32 users (fake LLM and TTS, one run per step) | 0 failures, no timeouts. Throughput stops growing at about 4 answers/s. Speech-recognition p50: 242 ms (1 user), 674 ms (8), 2868 ms (16), 7167 ms (32). The speech is one 7.9 s clip made with the macOS `say` voice, **not a human** |
+| Whisper cold start (6 fresh servers) | model load 465-577 ms, first transcription 788-898 ms |
+| Earlier single samples (M1-M3, not distributions) | Whisper warm call 987.6 ms for 7.3 s of audio; Gemini `gemini-2.5-flash` opener TTFT 3129 ms, total 3283 ms; stop-press to first sound with fake ASR/LLM 52 ms (fake voice), 69 ms (browser voice) |
 
-The real pipeline (Whisper + Gemini + voice end to end) has **not** been measured yet.
+**Not measured:** real Gemini under load, the whole real pipeline (Whisper + Gemini + voice) end to end, real browser voices under load, memory use. Low-user fake-provider numbers are inflated by an idle-clocked CPU (a 1-user step ran about 3x faster with other cores busy).
+
+## Observability
+
+- `GET /metrics`: JSON with p50/p95 per stage (`asr`, `llm_ttft`, `llm_total`, `first_sentence`, `first_speak`, `tts`), outcome counters and `error_rate`. In memory, per process, no authentication. `METRICS_WINDOW` (default 1000) sets how many recent samples each stage keeps.
+- `GET /dashboard`: a small page that polls `/metrics` every 2 s.
+- Logs are one JSON object per line, each with the `session_id`. uvicorn's own lines stay plain text.
+- Load test: `pip install -r requirements-dev.txt`, then `bash loadtest/sweep.sh 1 10 50 100` (see the header of `loadtest/locustfile.py`).
+
+## Docker
+
+```bash
+docker build -t voice-coach .
+docker run --rm -p 127.0.0.1:8000:8000 voice-coach      # demo mode, no keys
+```
+
+Publish the port on `127.0.0.1` only: `/metrics` has no authentication. To use real providers, pass the same variables as above with `-e` (for example `-e LLM_PROVIDER=gemini -e GEMINI_API_KEY=...`; never put a key in the image). `docker build --build-arg WITH_ASR=1 .` adds local Whisper (large; the model downloads inside the container on first use). **Status: the Dockerfile has not been built yet** (no Docker daemon was running when it was written); see `docs/architecture.md`.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request: the test suite on Python 3.13 (installing `requirements-asr.txt` for numpy), and a Docker job that builds the image, starts it and checks `/health`, `/`, `/metrics` and `/dashboard`. **Status: not run on GitHub yet.** The same install and test steps were run in a clean virtual environment locally (186 passed).
 
 ## Known limitations
 
@@ -84,7 +104,9 @@ The real pipeline (Whisper + Gemini + voice end to end) has **not** been measure
 - No fallback providers (for example a second LLM). The only fallbacks are the LLM retry and a text-only reply when TTS fails.
 - Tested in VS Code's built-in browser only (probably Chromium, not confirmed). Real Chrome, Safari and Firefox are untested. `speechSynthesis` behaves differently across them.
 - The spoken summary is text only. The tail of the audio (under about 43 ms) is dropped when recording stops.
-- Not yet verified with real Gemini or Whisper through the M4 task path.
+- Not yet verified with real Gemini or Whisper through the M4 task path, and the whole real pipeline has not been timed.
+- The first interview question is written by the LLM. A curated question bank is planned (after M6).
+- No limits across sessions: under real Whisper, extra users only wait longer (see Measured).
 
 ## Project layout
 
@@ -94,12 +116,16 @@ backend/
   session_state.py   interview state machine (pure)
   reliability.py     deadlines, retry rule, TurnRunner (pure asyncio)
   sessions.py        message builders, utterance buffer
+  metrics.py         in-memory p50/p95 per stage, outcome counters (pure)
+  logs.py            JSON log lines with the session id (contextvar)
   sentences.py       streaming sentence splitter
   prompts.py         prompt + history window
   asr/ llm/ tts/     provider interface + fake + real implementations
-frontend/index.html  one plain HTML + vanilla JS page
+frontend/            index.html (the app) and dashboard.html, plain HTML + vanilla JS
+loadtest/            Locust file, sweep/warm-up/summary scripts, raw results
 tests/               pytest; fakes with slow / failing modes
-docs/                architecture, learning notes
+docs/                architecture, learning notes, performance, project brief
+Dockerfile, .github/workflows/ci.yml
 ```
 
 ## Roadmap
@@ -107,5 +133,6 @@ docs/                architecture, learning notes
 | Module | Status |
 |---|---|
 | M0 skeleton, M1 mic to ASR, M2 LLM + state machine, M3 TTS + pipeline, M4 reliability | done |
-| M5 structured logs, `/metrics`, latency dashboard, load test | planned |
-| M6 Docker, GitHub Actions CI | planned |
+| M5 structured logs, `/metrics`, latency dashboard, load test, baseline report | done |
+| M6 Docker, GitHub Actions CI, README numbers | written; Docker build and the GitHub run are pending |
+| Curated question bank (JSON), then delivery feedback | planned |

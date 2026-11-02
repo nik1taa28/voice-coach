@@ -1,7 +1,7 @@
 # Project brief: Spoken Mock-Interview Coach
 
 For: me, before a placement interview. Read top to bottom once, then use sections 6 and 8 for revision.
-Status date: 2026-11-01. Covers M0 to M4 (committed). M5 (metrics, logs, dashboard, load test) is finished in the working tree but not committed; see `docs/performance.md` and the last bullet of section 8.
+Status date: 2026-11-02. Covers M0 to M4. M5 (metrics, logs, dashboard, load test) and M6 (Docker, CI) are also written; see `docs/performance.md` and the last bullets of section 8.
 
 ---
 
@@ -161,6 +161,8 @@ All deadlines are overridable with `TIMEOUT_*` variables and are **not tuned fro
 | Timeout values from data | **Pending** | current values are guesses |
 | Latency distributions (p50/p95) | **Verified for fakes (3 repeats, 1-100 users) and for real Whisper (1 run, 1-32 users)**; **pending for real Gemini and the whole real pipeline** | `docs/performance.md`; load generator on the same laptop, synthetic `say` voice |
 | Fallback providers | **Not built** | |
+| Docker image | **Written, not built** | no Docker daemon was running; step I in section 7 |
+| GitHub Actions CI | **Written, not run on GitHub** | the install + pytest steps passed in a clean virtual environment (186 passed) |
 | Curated question bank | **Not built (planned after M6)** | see section 8 |
 
 ---
@@ -228,6 +230,25 @@ Expect: `coach reply timed out` after the one retry.
 .venv/bin/python -m pytest -q -o faulthandler_timeout=15   # if a test hangs
 ```
 
+**H. Metrics and dashboard**
+Run any of A-F, open http://127.0.0.1:8000/dashboard in a second tab, then answer once in the main page. Expect the `asr` row to show n = 1 and `Turns ok` to go up. `curl -s http://127.0.0.1:8000/metrics` shows the same data as JSON. Stop the server: the page should show "Cannot read /metrics" and keep the last numbers.
+
+**I. Docker (never built yet)**
+Start Docker Desktop and wait until `docker info` works, then:
+```bash
+docker build -t voice-coach .
+docker run --rm -p 127.0.0.1:8000:8000 voice-coach
+```
+Open http://127.0.0.1:8000 and run step A. In another terminal: `docker ps` should show the container as `healthy` after about 10-40 s. Record the exact errors if the build fails.
+
+**J. Load test (optional, takes minutes)**
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+bash loadtest/sweep.sh 1 10 50
+.venv/bin/python loadtest/summarize.py
+```
+Keep the laptop idle meanwhile. Compare with `docs/performance.md`; your machine will differ.
+
 ---
 
 ## 8. Known weaknesses and honest limits (do not overclaim)
@@ -243,4 +264,4 @@ Expect: `coach reply timed out` after the one retry.
 - **The spoken summary is text only.** The last ~43 ms of audio is dropped when recording stops.
 - **`.env` is not loaded automatically**; variables must be exported.
 - **`TestClient` is not the real network layer.** A passing suite once hid a missing `websockets` install; that is why by-hand runs on real uvicorn matter.
-- **M5 (done, not committed):** `/metrics` has no authentication; metrics are per process and cleared on restart. Load tests ran the load generator on the same laptop as the server, closed-loop, 60 s per step. Real Whisper plateaus at about 4 answers per second (asr p50 674 ms at 8 users, 7167 ms at 32, no failures); I have a guess about why (one transcription at a time) but have not tested it. Gemini under load and the whole real pipeline were **not** measured. The 100-user hang during load testing was a bug in my test script (`ws.close()` swallowing Locust's kill), fixed and described in `PROGRESS.md`.
+- **M5 (done, committed):** `/metrics` has no authentication; metrics are per process and cleared on restart. Load tests ran the load generator on the same laptop as the server, closed-loop, 60 s per step. Real Whisper plateaus at about 4 answers per second (asr p50 674 ms at 8 users, 7167 ms at 32, no failures); I have a guess about why (one transcription at a time) but have not tested it. Gemini under load and the whole real pipeline were **not** measured. The 100-user hang during load testing was a bug in my test script (`ws.close()` swallowing Locust's kill), fixed and described in `PROGRESS.md`.

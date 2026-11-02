@@ -411,3 +411,55 @@ flowchart TD
 - Latency fell as users rose (1 user 15 ms server, 100 users 4.7 ms) in all 3 repeats. With two busy loops on other cores, the 1-user step also dropped to 5.0 ms. So the machine, not the app, explains it; the mechanism was not measured.
 - Locust printed `CPU usage above 90%` at 200 users. That step measured the load generator as much as the server, so it is not a capacity figure.
 - zsh treats a bare `======` word as a command; use a different separator in shell snippets.
+
+## M6: Docker, CI, and a README that only states what was run
+
+```mermaid
+flowchart LR
+  C[git push] --> T["job test<br/>clean Python 3.13<br/>pip install requirements + asr<br/>pytest"]
+  C --> D["job docker<br/>docker build<br/>run, curl /health, /, /metrics, /dashboard"]
+  T --> G{both green?}
+  D --> G
+```
+
+```mermaid
+flowchart TD
+  L1["python:3.13-slim"] --> L2["requirements copied + pip install<br/>(rebuilt only when requirements change)"]
+  L2 --> L3["backend/ + frontend/ copied<br/>(rebuilt on every code change)"]
+  L3 --> L4["non-root user, HEALTHCHECK /health,<br/>CMD uvicorn 0.0.0.0:8000"]
+```
+
+- A clean environment is the only honest test of "does it work for someone else". Mine has every package installed, so it cannot show a missing dependency.
+- Demo mode must start without the optional Whisper packages. That works because `faster_whisper` is imported lazily, inside `WhisperASR._get_model`. A clean virtual environment with only `requirements.txt` confirmed it.
+- Layer order is a speed decision: dependencies change rarely, code changes constantly, so dependencies are installed first and cached.
+- The container listens on `0.0.0.0` (it has to), so the port is published on `127.0.0.1` only. `/metrics` has no authentication.
+- Secrets are never baked into the image: keys are passed with `-e` at run time.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Base image | `python:3.13-slim` | alpine, full Debian image | matches the Python used locally; slim has glibc wheels for faster-whisper; bigger than alpine |
+| Whisper in the image | opt-in `--build-arg WITH_ASR=1` | always installed | the default image is small and needs no downloads; the Whisper image is large and downloads the model on first use |
+| Runtime user | non-root `appuser` | root (default) | a bug in the app cannot write across the container; the home directory must be writable for a model cache |
+| CI jobs | tests and Docker build in separate jobs | one job | independent failures, run in parallel; the image is built twice if you also build locally |
+| CI test deps | `requirements-asr.txt` too | install numpy alone | one declared place for optional deps; the install is slower |
+| Load test in CI | not included | nightly job | needs minutes and a generator that does not share the machine under test; a noisy shared runner would make numbers meaningless |
+| README numbers | only measured ones, with setup and a "not measured" list | round marketing figures | longer, but every figure can be traced to `docs/performance.md` |
+
+### Verified so far
+- Local, by running: a clean virtual environment with only `requirements.txt` serves all four pages and finishes a fake-provider opener over WebSocket; the same environment plus `requirements-asr.txt` passes the suite (186 passed).
+- The workflow YAML parses.
+- **Pending:** the Docker build and run (no daemon was available), and the first real GitHub Actions run.
+
+**Key concept:** reproducibility. A build or test result only counts if it can be repeated from a declared recipe on a machine that has nothing else. Dockerfile and CI are the recipe, written down.
+
+**Interview question:** How do you know your CI is testing the same thing you run locally?
+*Short answer:* I do not assume it. The CI job installs from the same requirements files into a clean environment, so anything my laptop has that the files do not declare shows up as a failure there. I ran the same steps in a clean virtual environment before relying on it. What I cannot claim is that the GitHub run itself is green until it has actually run.
+
+**Exercise:** break the recipe on purpose. Remove `numpy` from the CI install (drop `requirements-asr.txt`), run the suite in a clean virtual environment, and read which tests fail and why. Then decide whether to install numpy alone or keep the file.
+
+**Common mistake:** treating a file that parses as a pipeline that works. The workflow YAML is valid and the Dockerfile reads well, but neither has run: the first real run will find the problems (a wrong action version, a missing package in the slim image).
+
+**Observed:**
+- In zsh, `path` is tied to `$PATH`. A shell loop `for path in ...` replaced the search path, so `curl`, `head` and `lsof` suddenly "did not exist", and a line like `lsof ... || echo "port free"` then printed "free" for the wrong reason. Use another variable name, and distrust a success message that only comes from `||`.
+- The Docker CLI can be installed while the daemon is not running; `docker --version` succeeding proves nothing about being able to build.

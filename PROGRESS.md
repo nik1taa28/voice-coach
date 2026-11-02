@@ -11,8 +11,8 @@
 | M2 LLM + state machine | Done, committed (`360bfd0`), tests pass; real Gemini verified once by hand |
 | M3 TTS + pipelining | Done, committed (`df16505`), tests pass; verified by hand in one browser |
 | M4 reliability | Done, committed (`74ce23c`), tests pass; verified by hand on real uvicorn (fake providers) |
-| M5 observability | **Done in the working tree, NOT committed (waiting for your OK).** Metrics, `/metrics`, JSON logs with session ids, dashboard, Locust load test, baseline report, learning notes |
-| M6 Docker / CI / README numbers | Not started |
+| M5 observability | Done, committed (`6e1787a`, branch `m5-observability`). Metrics, `/metrics`, JSON logs with session ids, dashboard, Locust load test, baseline report, learning notes |
+| M6 Docker / CI / README numbers | **Written, partly verified.** README updated with measured numbers; CI recipe verified in a clean venv (186 passed); demo mode verified from a clean venv. **Dockerfile not built** (no Docker daemon) and **CI not run on GitHub** |
 | Curated question bank | Planned, after M6 (your decision). Not built |
 
 **Tests:** `186 passed in 3.50s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-01. 148 are M0-M4; 38 are M5.
@@ -20,8 +20,8 @@
 **Failed / open:** nothing is failing. The one failure, the Locust 100-user hang, is **fixed** (see below).
 
 **Needs you:**
-1. **Commit M5?** Nothing was committed. `git status` shows the M5 files plus your two `CLAUDE.md` lines and an edited README/architecture/learning-notes.
-2. **What to do with `loadtest/results/`:** it is 52 MB, mostly 4 MB server logs and archived runs. Suggest ignoring it (or only keeping the CSV/JSON summaries) before committing.
+1. **Build and run the Docker image** (commands in `docs/PROJECT_BRIEF.md` section 7, step I). Start Docker Desktop first.
+2. **Push a branch to GitHub** to get the first real CI run (I did not push anything).
 3. **Your own tests:** real microphone, real Whisper + Gemini end to end, other browsers (commands in `docs/PROJECT_BRIEF.md` section 7).
 4. A server from your terminal is still listening on port 8000 (PID 56194). I never touched it.
 
