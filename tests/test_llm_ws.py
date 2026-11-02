@@ -97,6 +97,21 @@ def test_pause_blocks_recording_and_resume_restores_it(llm):
         assert read_until(ws, "state", state="listening")
 
 
+def test_summary_request_carries_the_sessions_topic_and_difficulty(llm):
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()  # session
+        ws.send_json({"type": "start", "topic": "Operating Systems", "difficulty": "hard"})
+        read_until(ws, "state", state="listening")
+        speak(ws)
+        read_until(ws, "state", state="listening")
+        ws.send_json({"type": "end"})
+        read_until(ws, "summary")
+    summary_prompt = llm.calls[-1]  # opener, one reply, then the summary
+    assert len(llm.calls) == 3
+    assert "Operating Systems" in summary_prompt[0].text and "hard" in summary_prompt[0].text
+    assert summary_prompt[-1].role == "user" and "Practice next:" in summary_prompt[-1].text
+
+
 def test_end_sends_summary_and_locks_the_session(llm):
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)

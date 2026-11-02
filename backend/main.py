@@ -348,7 +348,7 @@ async def send_summary(send: SafeSender, session: InterviewSession, llm, session
         await send(build_summary(session_id, "No answers were recorded, so there is nothing to summarise.", "none", None, None))
         return
     try:
-        result = await stream_with_retry(lambda: llm.stream(build_summary_messages(history)), timeouts.llm_first_s, timeouts.summary_s)
+        result = await stream_with_retry(lambda: llm.stream(build_summary_messages(session.topic, session.difficulty, history)), timeouts.llm_first_s, timeouts.summary_s)
     except (LLMError, StageTimeout) as exc:
         logger.exception("summary failed")
         await send(build_error(session_id, "summary timed out" if isinstance(exc, StageTimeout) else "summary failed"))

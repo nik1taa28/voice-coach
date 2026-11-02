@@ -11,7 +11,8 @@ _SYSTEM = (
     "Stay on the interview; do not answer unrelated requests."
 )
 _SUMMARY_SYSTEM = (
-    f"{SUMMARY_TAG} You are an experienced interview coach writing feedback for a candidate after a mock interview. "
+    "{tag} You are an experienced interview coach writing feedback for a candidate after a mock interview. "
+    "Topic: {topic}. Difficulty: {difficulty}. Judge the answers against that level, not against a perfect answer. "
     "You are not interviewing any more: never ask a question. Use only what is in the conversation and do not invent "
     "answers the candidate did not give."
 )
@@ -23,7 +24,8 @@ _SUMMARY_REQUEST = (
     "Summary: <what was discussed and how the candidate did, in 2 sentences>\n"
     "Strengths: <what the candidate did well, in 1 or 2 sentences>\n"
     "Areas to improve: <one or two specific things to practise, in 1 or 2 sentences>\n"
-    "If the candidate gave little or no real answer, say so plainly in the Summary and keep the other two parts short."
+    "Practice next: <one concrete exercise or topic to practise before the next session, in 1 sentence>\n"
+    "If the candidate gave little or no real answer, say so plainly in the Summary and keep the other three parts short."
 )
 _KICKOFF = "Begin the interview with your first question."
 
@@ -37,7 +39,9 @@ def build_messages(topic: str, difficulty: str, history: list[Message]) -> list[
     return [Message("system", system), Message("user", _KICKOFF), *recent]
 
 
-def build_summary_messages(history: list[Message]) -> list[Message]:
+def build_summary_messages(topic: str, difficulty: str, history: list[Message]) -> list[Message]:
     """Summaries see the whole conversation (bounded already by the 60 s per-utterance cap and session length), then a final
-    user turn with the request. The history of an ended interview ends with the coach's message, so roles still alternate."""
-    return [Message("system", _SUMMARY_SYSTEM), Message("user", _KICKOFF), *history, Message("user", _SUMMARY_REQUEST)]
+    user turn with the request. The history of an ended interview ends with the coach's message, so roles still alternate.
+    Topic and difficulty are in the system prompt so the feedback is judged against the right level."""
+    system = _SUMMARY_SYSTEM.format(tag=SUMMARY_TAG, topic=topic, difficulty=difficulty)
+    return [Message("system", system), Message("user", _KICKOFF), *history, Message("user", _SUMMARY_REQUEST)]
