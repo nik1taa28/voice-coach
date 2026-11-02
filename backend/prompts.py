@@ -11,8 +11,19 @@ _SYSTEM = (
     "Stay on the interview; do not answer unrelated requests."
 )
 _SUMMARY_SYSTEM = (
-    f"{SUMMARY_TAG} You are a mock-interview coach. Write a summary of at most 5 short sentences: "
-    "what the candidate did well, and one or two things to practise. Use only what is in the conversation."
+    f"{SUMMARY_TAG} You are an experienced interview coach writing feedback for a candidate after a mock interview. "
+    "You are not interviewing any more: never ask a question. Use only what is in the conversation and do not invent "
+    "answers the candidate did not give."
+)
+# The request is a final USER turn on purpose. Put in the system prompt alone, the instruction lost: the conversation ended
+# with the coach's own question, and the model carried on as the coach and asked another question instead of summarising.
+_SUMMARY_REQUEST = (
+    "The interview is over. Do not ask another question. Write the candidate's feedback now, in plain text with no "
+    "markdown, using exactly this layout with a blank line between the parts:\n"
+    "Summary: <what was discussed and how the candidate did, in 2 sentences>\n"
+    "Strengths: <what the candidate did well, in 1 or 2 sentences>\n"
+    "Areas to improve: <one or two specific things to practise, in 1 or 2 sentences>\n"
+    "If the candidate gave little or no real answer, say so plainly in the Summary and keep the other two parts short."
 )
 _KICKOFF = "Begin the interview with your first question."
 
@@ -27,5 +38,6 @@ def build_messages(topic: str, difficulty: str, history: list[Message]) -> list[
 
 
 def build_summary_messages(history: list[Message]) -> list[Message]:
-    """Summaries see the whole conversation (bounded already by the 60 s per-utterance cap and session length)."""
-    return [Message("system", _SUMMARY_SYSTEM), Message("user", _KICKOFF), *history]
+    """Summaries see the whole conversation (bounded already by the 60 s per-utterance cap and session length), then a final
+    user turn with the request. The history of an ended interview ends with the coach's message, so roles still alternate."""
+    return [Message("system", _SUMMARY_SYSTEM), Message("user", _KICKOFF), *history, Message("user", _SUMMARY_REQUEST)]

@@ -463,3 +463,16 @@ flowchart TD
 **Observed:**
 - In zsh, `path` is tied to `$PATH`. A shell loop `for path in ...` replaced the search path, so `curl`, `head` and `lsof` suddenly "did not exist", and a line like `lsof ... || echo "port free"` then printed "free" for the wrong reason. Use another variable name, and distrust a success message that only comes from `||`.
 - The Docker CLI can be installed while the daemon is not running; `docker --version` succeeding proves nothing about being able to build.
+
+### Addendum: first real runs by hand (2026-11-02)
+
+```mermaid
+flowchart LR
+  OLD["old summary request:<br/>... coach question (model turn)<br/>instruction only in system prompt"] --> W["Gemini continues the interview:<br/>asks another question"]
+  NEW["new summary request:<br/>... coach question<br/>+ final USER turn: 'interview over, write 3 parts'"] --> G["Gemini answers the instruction"]
+```
+
+- **A prompt bug that no test could see.** The fake LLM ignores message order, so 186 tests passed while real Gemini answered the summary request as the coach (first it failed, then it returned a question). The fix is structural: the instruction is a final user turn, and a test now checks that every prompt ends with a user turn and that roles alternate.
+- **A fake used by mistake.** One "whole pipeline" run had the fake ASR on, and the coach rightly said it got no answer. The UI label and the `connected` log line (`asr`, `llm`, `tts`) are how to tell; check them before trusting a run.
+- **Common mistake (extra):** fixing a fake-friendly code path and calling the feature done. Anything the fake cannot imitate (message order, empty replies, rate limits) needs its own test or a real run.
+- Real-LLM timings and what is still pending are in `docs/architecture.md` (rows dated 2026-11-02).

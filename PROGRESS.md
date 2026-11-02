@@ -15,9 +15,9 @@
 | M6 Docker / CI / README numbers | **Written, partly verified.** README updated with measured numbers; CI recipe verified in a clean venv (186 passed); demo mode verified from a clean venv. **Dockerfile not built** (no Docker daemon) and **CI not run on GitHub** |
 | Curated question bank | Planned, after M6 (your decision). Not built |
 
-**Tests:** `186 passed in 3.50s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-01. 148 are M0-M4; 38 are M5.
+**Tests:** `190 passed in 3.46s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-02. 148 are M0-M4; 38 are M5; 4 are new prompt tests.
 
-**Failed / open:** nothing is failing. The one failure, the Locust 100-user hang, is **fixed** (see below).
+**Failed / open:** the Locust 100-user hang is fixed (see below). **Found in your real runs: the end summary was wrong** (Gemini asked another question instead of summarising). Fixed in `backend/prompts.py` (final user turn, three parts: Summary, Strengths, Areas to improve) and tested with the fake only; **press End in a real Gemini run to confirm**. The fix is not committed yet.
 
 **Needs you:**
 1. **Build and run the Docker image** (commands in `docs/PROJECT_BRIEF.md` section 7, step I). Start Docker Desktop first.
