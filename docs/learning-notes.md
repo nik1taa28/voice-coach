@@ -449,7 +449,7 @@ flowchart TD
 ### Verified so far
 - Local, by running: a clean virtual environment with only `requirements.txt` serves all four pages and finishes a fake-provider opener over WebSocket; the same environment plus `requirements-asr.txt` passes the suite (186 passed).
 - The workflow YAML parses.
-- **Pending:** the Docker build and run (no daemon was available), and the first real GitHub Actions run.
+- **Pending:** the first real GitHub Actions run. (Update 2026-11-03: the Docker image was built and run locally in demo mode; see `docs/architecture.md`.)
 
 **Key concept:** reproducibility. A build or test result only counts if it can be repeated from a declared recipe on a machine that has nothing else. Dockerfile and CI are the recipe, written down.
 
@@ -653,3 +653,23 @@ sequenceDiagram
 **Exercise:** record yourself answering once fluently and once with deliberate long pauses. Compare `pauses` and `longest_pause_s` in the transcript message, then try `RELATIVE_SILENCE` at 0.05 and 0.2 and see which one matches what you heard.
 
 **Common mistake:** keeping per-answer data in a list that is appended "only when there is data", next to a history that is rolled back by popping. The first rollback without data pops the wrong entry, and the summary then counts an answer that was cancelled.
+
+### Addendum: first Docker build and run (2026-11-03)
+
+```mermaid
+flowchart LR
+  R[requirements.txt] --> L1[layer: pip install<br/>rebuilt only when requirements change]
+  L1 --> L2[layer: COPY backend, data, frontend<br/>rebuilt on every code edit]
+  L2 --> U[USER appuser uid 10001]
+  U --> H[HEALTHCHECK /health every 30 s]
+  H --> P["publish 127.0.0.1:8000 only<br/>/metrics has no auth"]
+```
+
+- **Measured, once:** build 25 s (first build on this laptop), image 251 MB, `healthy` within 8 s of starting, one demo interview through the container with 0 error log lines. One run, not a benchmark.
+- **Why the checks are not just `docker run`:** the container being up says little. `/health` answers from inside the app, `docker inspect` shows the HEALTHCHECK itself works, `id` shows it is not root, and `ls /app` shows no `.env` was copied in.
+- **Found nothing wrong,** which is a result too: `COPY data ./data` (added when the bank moved) was the only Dockerfile change needed, and the build confirmed it.
+
+**Interview question:** Why copy `requirements.txt` before the source code in a Dockerfile?
+*Short answer:* Docker caches each layer. The dependency install only reruns when a requirements file changes. Copying the source first would invalidate that layer on every code edit, and every rebuild would reinstall everything.
+
+**Common mistake:** publishing the container port on all interfaces (`-p 8000:8000`). This app's `/metrics` has no authentication, so the README publishes it on `127.0.0.1` only.

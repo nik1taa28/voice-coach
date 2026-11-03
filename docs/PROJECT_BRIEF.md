@@ -161,7 +161,7 @@ All deadlines are overridable with `TIMEOUT_*` variables and are **not tuned fro
 | Timeout values from data | **Pending** | current values are guesses |
 | Latency distributions (p50/p95) | **Verified for fakes (3 repeats, 1-100 users) and for real Whisper (1 run, 1-32 users)**; **pending for real Gemini and the whole real pipeline** | `docs/performance.md`; load generator on the same laptop, synthetic `say` voice |
 | Fallback providers | **Not built** | |
-| Docker image | **Written, not built** | no Docker daemon was running; step I in section 7 |
+| Docker image | **Built and run (2026-11-03), demo mode** | see `docs/architecture.md`; the optional `WITH_ASR=1` image is not built |
 | GitHub Actions CI | **Written, not run on GitHub** | the install + pytest steps passed in a clean virtual environment (186 passed) |
 | Curated question bank | **Not built (planned after M6)** | see section 8 |
 
