@@ -140,7 +140,7 @@ Dockerfile, .github/workflows/ci.yml
 |---|---|
 | M0 skeleton, M1 mic to ASR, M2 LLM + state machine, M3 TTS + pipeline, M4 reliability | done |
 | M5 structured logs, `/metrics`, latency dashboard, load test, baseline report | done |
-| M6 Docker, GitHub Actions CI, README numbers | Docker image built and run locally in demo mode (251 MB, healthy, full interview through the container); the GitHub run is pending (no remote yet) |
+| M6 Docker, GitHub Actions CI, README numbers | Docker image built and run locally in demo mode (251 MB, healthy, full interview through the container); CI passed on GitHub on its first run (green tick, user-reported; details not recorded) |
 | Curated question bank (JSON): bank questions, LLM follow-ups, `GET /topics`, topic dropdown | done; two real Gemini sessions checked by hand |
 | Code-owned loop: JSON follow_up / move_on decisions with fallback, follow-up cap, automatic ending (count, time, bank), `ending` state | done (279 tests, one real-server run in demo mode); real Gemini run pending |
 | Delivery feedback (words per minute, fillers, pauses, answer length), measured and written by code | done (tests, and the detector run on the `say` test clip); real microphone **not validated** |

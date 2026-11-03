@@ -12,7 +12,7 @@
 | M3 TTS + pipelining | Done, committed (`df16505`), tests pass; verified by hand in one browser |
 | M4 reliability | Done, committed (`74ce23c`), tests pass; verified by hand on real uvicorn (fake providers) |
 | M5 observability | Done, committed (`6e1787a`). Metrics, `/metrics`, JSON logs, dashboard, Locust load test, baseline report |
-| M6 Docker / CI / README numbers | **Written, partly verified.** CI recipe verified in a clean venv; demo mode from a clean venv. **Docker image built and run locally on 2026-11-03** (demo mode: 25 s build, 251 MB, healthy, full interview through the container; the `WITH_ASR=1` image is not built) and **CI never run**: the repo has **no GitHub remote** and `gh` is not installed |
+| M6 Docker / CI / README numbers | **Written, partly verified.** CI recipe verified in a clean venv; demo mode from a clean venv. **Docker image built and run locally on 2026-11-03** (demo mode: 25 s build, 251 MB, healthy, full interview through the container; the `WITH_ASR=1` image is not built) and **CI run on GitHub once (user-reported, 2026-11-03): a green tick on the Actions page for the first push of `question-loop`**. Repo: https://github.com/nik1taa28/voice-coach (`main` = M0 only; `question-loop` has everything, pull request opened by the user). Which jobs ran, durations and the run number were not reported |
 | Curated question bank | Done (`a14f113`, moved to `data/` in `2f91d68`). 65 questions, 7 topics. Summary prompt fixed after two real Gemini runs (`bb79da9`) |
 | Code-owned loop | Done (`0bb9a1b`..`1c54177`). JSON follow_up / move_on with fallback, follow-up cap in code, automatic end after 5/6/8/10 questions, at the time limit or when the bank runs out, `ending` state. Borrowing from the nearest level (`805f13a`). One real Gemini session: 2 valid decisions, 1 invalid-reply fallback (**cause pending**) |
 | Delivery feedback (stretch) | Done (`2d4b84c`, `6f09676`, docs). Words per minute, fillers, pauses, length; measured by code, never by the LLM. **Real microphone not validated** |
@@ -23,7 +23,7 @@
 1. **The `invalid reply` log line** from the real Gemini run (search your server terminal). It says why one decision fell back.
 2. **One real session** with the new build: Python basics, 6 questions. It should reach 6 by borrowing levels. Check the delivery line under the summary with your real microphone, and the page in a browser.
 3. ~~Docker~~ done in demo mode (see `docs/architecture.md`). Optional: the `WITH_ASR=1` image.
-4. **CI:** create a GitHub repository, add it as `origin`, and push. I have not pushed anything and will not without you saying so.
+4. ~~CI~~ pushed by the user and green. Remaining: merge the pull request (`question-loop` into `main`) once happy with the diff.
 5. **Review `data/question_bank.json`**: difficulty labels are my judgement. Python basics, Data structures and Databases and SQL have 6 questions each, so 8 or 10 question interviews end early there.
 6. A server from your terminal is listening on port 8001 (PID 28719). I never touched it. The old note about port 8000 is gone: nothing listens there now.
 

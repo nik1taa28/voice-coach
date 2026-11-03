@@ -449,7 +449,7 @@ flowchart TD
 ### Verified so far
 - Local, by running: a clean virtual environment with only `requirements.txt` serves all four pages and finishes a fake-provider opener over WebSocket; the same environment plus `requirements-asr.txt` passes the suite (186 passed).
 - The workflow YAML parses.
-- **Pending:** the first real GitHub Actions run. (Update 2026-11-03: the Docker image was built and run locally in demo mode; see `docs/architecture.md`.)
+- **Update 2026-11-03: the first GitHub Actions run was green (user-reported; per-job details not recorded).** (The Docker image had been built and run locally in demo mode first; see `docs/architecture.md`.)
 
 **Key concept:** reproducibility. A build or test result only counts if it can be repeated from a declared recipe on a machine that has nothing else. Dockerfile and CI are the recipe, written down.
 
