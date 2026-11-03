@@ -2,7 +2,7 @@
 
 ## Summary (read this first)
 
-**Read first:** `docs/PROJECT_BRIEF.md` (sections 2, 6 and 8), then `docs/performance.md`.
+**Read first:** `docs/PROJECT_BRIEF.md` (sections 2, 6 and 8), then `docs/performance.md`. Current branch: `question-loop` (built on `m6-docker-ci`); nothing is merged to `main` or pushed.
 
 | | Status |
 |---|---|
@@ -11,20 +11,23 @@
 | M2 LLM + state machine | Done, committed (`360bfd0`), tests pass; real Gemini verified once by hand |
 | M3 TTS + pipelining | Done, committed (`df16505`), tests pass; verified by hand in one browser |
 | M4 reliability | Done, committed (`74ce23c`), tests pass; verified by hand on real uvicorn (fake providers) |
-| M5 observability | Done, committed (`6e1787a`, branch `m5-observability`). Metrics, `/metrics`, JSON logs with session ids, dashboard, Locust load test, baseline report, learning notes |
-| M6 Docker / CI / README numbers | **Written, partly verified.** README updated with measured numbers; CI recipe verified in a clean venv (186 passed); demo mode verified from a clean venv. **Dockerfile not built** (no Docker daemon) and **CI not run on GitHub** |
-| Curated question bank | **Built, uncommitted.** 65 questions, 7 topics (OS split into 3). Bank question spoken with no LLM call, then 2 LLM follow-ups (`FOLLOWUPS_PER_QUESTION`), `GET /topics`, topic dropdown, key points in the prompts. Tests and a demo-mode server run only; **real Gemini run pending** |
+| M5 observability | Done, committed (`6e1787a`). Metrics, `/metrics`, JSON logs, dashboard, Locust load test, baseline report |
+| M6 Docker / CI / README numbers | **Written, partly verified.** CI recipe verified in a clean venv; demo mode from a clean venv. **Dockerfile never built** (no Docker daemon) and **CI never run**: the repo has **no GitHub remote** and `gh` is not installed |
+| Curated question bank | Done (`a14f113`, moved to `data/` in `2f91d68`). 65 questions, 7 topics. Summary prompt fixed after two real Gemini runs (`bb79da9`) |
+| Code-owned loop | Done (`0bb9a1b`..`1c54177`). JSON follow_up / move_on with fallback, follow-up cap in code, automatic end after 5/6/8/10 questions, at the time limit or when the bank runs out, `ending` state. Borrowing from the nearest level (`805f13a`). One real Gemini session: 2 valid decisions, 1 invalid-reply fallback (**cause pending**) |
+| Delivery feedback (stretch) | Done (`2d4b84c`, `6f09676`, docs). Words per minute, fillers, pauses, length; measured by code, never by the LLM. **Real microphone not validated** |
 
-**Tests:** `236 passed in 3.63s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-03. About 25 older WebSocket tests were rewritten because the opener is now a bank question.
+**Tests:** `307 passed in 4.05s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-03.
 
-**Failed / open:** the Locust 100-user hang is fixed (see below). **Found in your real runs: the end summary was wrong** (Gemini asked another question instead of summarising). Fixed in `backend/prompts.py` (final user turn; four parts: Summary, Strengths, Areas to improve, Practice next; topic and difficulty now passed in) and tested with the fake only; **press End in a real Gemini run to confirm**.
+**Needs you (in order of value):**
+1. **The `invalid reply` log line** from the real Gemini run (search your server terminal). It says why one decision fell back.
+2. **One real session** with the new build: Python basics, 6 questions. It should reach 6 by borrowing levels. Check the delivery line under the summary with your real microphone, and the page in a browser.
+3. **Docker:** start Docker Desktop, then build and run (commands in `docs/PROJECT_BRIEF.md` section 7, step I). The Dockerfile now also copies `data/`.
+4. **CI:** create a GitHub repository, add it as `origin`, and push. I have not pushed anything and will not without you saying so.
+5. **Review `data/question_bank.json`**: difficulty labels are my judgement. Python basics, Data structures and Databases and SQL have 6 questions each, so 8 or 10 question interviews end early there.
+6. A server from your terminal is listening on port 8001 (PID 28719). I never touched it. The old note about port 8000 is gone: nothing listens there now.
 
-**Needs you:**
-0. **Review `backend/question_bank.json`** (65 questions I wrote; difficulty labels are my judgement) and **run the real pipeline once**: `source .env`, start, answer 2-3 times, End. Check the summary has the four parts, mentions topic/level, a concrete *Practice next*, no question; and that follow-ups do not read the key points out. Gemini free tier was 20 requests/day on `gemini-2.5-flash` (429 seen on 2026-11-02); bank turns now save calls.
-1. **Build and run the Docker image** (commands in `docs/PROJECT_BRIEF.md` section 7, step I). Start Docker Desktop first.
-2. **Push a branch to GitHub** to get the first real CI run (I did not push anything).
-3. **Your own tests:** real microphone, real Whisper + Gemini end to end, other browsers (commands in `docs/PROJECT_BRIEF.md` section 7).
-4. A server from your terminal is still listening on port 8000 (PID 56194). I never touched it.
+**Not done / pending (by choice or limits):** real Gemini under load (free tier), the whole real pipeline under load, the Whisper plateau experiment, timeout tuning from real data, `.env` auto-loading (still: `source .env`).
 
 ## What this session added (M5)
 

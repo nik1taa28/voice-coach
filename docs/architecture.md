@@ -221,3 +221,27 @@ flowchart TD
 | Real Gemini returning valid decision JSON | Partial (one real session, user-reported, 2026-11-03) | Python basics: 3 decision calls; 2 valid (one follow_up, one move_on with Gemini's own text), **1 fallback** (`decision_fallback: 1` in `/metrics`). All 3 calls returned a complete reply (`llm_total` n = 3), so the fallback was an *invalid* reply, not a timeout or error. **Why it was invalid: pending** (the `invalid reply` log line was not captured yet). Key points were not spoken; the summary had the 4 parts and called a garbled answer unclear |
 | Cost of not streaming follow-ups, real Gemini | Measured once (3 calls, one session) | `llm_ttft` p50 2183 ms, `llm_total` p50 2197 ms: Gemini sent the short JSON almost in one go, so waiting for the complete reply cost about 14 ms at the median here. A small sample on one machine and network, not a distribution |
 | Borrowing from adjacent levels (`levels_by_distance`, `pick_question`) | Verified (tests) | found in the real run above: it ended after 2 questions with `bank_exhausted`, because every topic and level has only 2-6 questions. Now the chosen level comes first, then the nearest other level (ties go easier), always on the same topic; each question keeps its own level for the decision and summary prompts. `tests/test_questions.py`, `tests/test_llm.py`; 286 passed. **Still limited by content:** Python basics, Data structures, Databases and SQL have 6 questions in total and Computer networks 9, so 8 or 10 questions end early there with `bank_exhausted` |
+
+## Delivery feedback (stretch, 2026-11-03)
+
+Measurable signals only; no tone or emotion analysis.
+
+```mermaid
+flowchart LR
+  PCM[answer PCM16] --> S["frame loudness, 30 ms<br/>silent below max(200, 10% of loud level)"]
+  S --> SP[speaking time: first to last speech frame]
+  S --> PA[pauses: inner silent gaps of 1 s or more]
+  T[transcript] --> W[words] & F[fillers: um, uh, er, hmm, ah, you know, I mean]
+  W & SP --> R[words per minute]
+  R & PA & F & SP --> D["transcript.delivery (per answer)"]
+  D --> L["summary.delivery: one line written by code"]
+```
+
+| Part | Status | Evidence |
+|---|---|---|
+| `backend/delivery.py`: `analyze`, `speech_frames`, `count_fillers`, `session_line` (pure, no numpy) | Verified (tests) | `tests/test_delivery.py` (15) with synthetic tones and silence: pauses, trimmed leading/trailing silence, short gaps ignored, quiet microphone, filler word boundaries. 60 s of audio analysed in 28 ms (one run, this laptop) |
+| Per-answer numbers in `transcript.delivery`; stats stored with each user message and rolled back with it; `summary.delivery` line | Verified (tests) | `tests/test_llm_ws.py`, `tests/test_state.py`: a cancelled answer's stats are dropped; the LLM's prompts never contain the numbers. 307 passed in total |
+| Detector on speech-like audio | Checked once | `loadtest/audio/answer.wav` (macOS `say`, 7.89 s): word gaps of 30-210 ms found, 0 pauses, 7.74 s speaking. Synthetic voice in a quiet file: **a real microphone with room noise is not validated** |
+| Thresholds (30 ms frames, pause of 1 s, `MIN_RMS` 200, 10% relative) | Guesses | not tuned against human speech |
+| Filler count with real Whisper | Known limitation | Whisper often leaves out "um" / "uh", so the count is a lower bound; the page says so next to the number. Ambiguous words ("like", "so", "actually") are not counted |
+| Page: per-answer numbers in the timing line, delivery line with caveats under the summary | Implemented (string tests only) | **not seen in a browser yet** |

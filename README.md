@@ -143,4 +143,4 @@ Dockerfile, .github/workflows/ci.yml
 | M6 Docker, GitHub Actions CI, README numbers | written; Docker build and the GitHub run are pending |
 | Curated question bank (JSON): bank questions, LLM follow-ups, `GET /topics`, topic dropdown | done; two real Gemini sessions checked by hand |
 | Code-owned loop: JSON follow_up / move_on decisions with fallback, follow-up cap, automatic ending (count, time, bank), `ending` state | done (279 tests, one real-server run in demo mode); real Gemini run pending |
-| Delivery feedback (words per minute, fillers, pauses) | planned |
+| Delivery feedback (words per minute, fillers, pauses, answer length), measured and written by code | done (tests, and the detector run on the `say` test clip); real microphone **not validated** |

@@ -608,3 +608,48 @@ flowchart LR
 | Thin bank | borrow the nearest level, same topic | write about 210 questions; cap the menu by what exists; accept early ends | no new content and the interview fills up; the level is no longer pure, so the prompts must judge each question at its own level |
 
 **Common mistake:** testing only with small hand-made data. The logic was right for the test bank and wrong for the real one. Add one test that runs your rules over the shipped data.
+
+## Delivery feedback: numbers the code measures, not opinions the model writes (2026-11-03)
+
+```mermaid
+sequenceDiagram
+  participant B as browser
+  participant S as server (answer task)
+  participant A as asyncio.to_thread
+  participant M as session
+  B->>S: PCM16 answer
+  S->>S: ASR -> transcript text
+  S->>A: analyze(text, pcm)
+  A-->>S: DeliveryStats (words, speaking_s, wpm, fillers, pauses)
+  S->>B: transcript + delivery
+  S->>M: add_user(text, stats)  (rolled back together on cancel)
+  Note over S,M: at the end: session_line(stats) -> summary.delivery
+```
+
+- **Problem:** the coach judged *what* you said but not *how*: rate, hesitation, long silences, rambling.
+- **Now:** every answer gets measured numbers. The summary ends with one sentence built by code from those numbers, for example "3 answers, 24 s on average; 132 words per minute; 2 filler words ...; 1 pause of 1 s or more (longest 1.8 s)."
+- **Silence detection, in one line:** cut the audio into 30 ms frames, compute each frame's loudness (RMS), and call a frame silent when it is quieter than 10% of the clip's loud level (but always below 200). Pauses are runs of silent frames of at least 1 s *between* speech; leading and trailing silence is trimmed.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Source of pauses | the audio (frame loudness) | Whisper word timestamps | works with any ASR and the fake, no extra Whisper cost, unit-testable with synthetic audio; cannot tell a breath from a thinking pause, and room noise can hide a pause |
+| Who states the numbers | code (`session_line`) | give the numbers to the LLM | no invented or misquoted number, no extra quota; the wording is plain and fixed |
+| Silence threshold | relative (10% of the 90th-percentile loudness) with a fixed floor | one fixed loudness | copes with quiet and loud microphones; one very loud cough can raise the threshold for that clip |
+| Fillers | conservative list (um, uh, er, hmm, ah, you know, I mean) | include like / so / actually | fewer false positives ("I like lists"); an undercount, made worse by Whisper dropping fillers |
+| Where it runs | `asyncio.to_thread` | inline in the event loop | 28 ms for 60 s of audio, so inline would mostly be fine; the thread makes sure one long answer never delays other sessions |
+| Storage | one stats entry per user message, popped on rollback | a separate list appended only when stats exist | the two lists cannot drift apart: an entry can be `None`, but it always exists |
+
+### Verified so far
+- 307 tests pass (run 2026-11-03).
+- The detector on the `say` test clip: word gaps 30-210 ms, no pauses, 7.74 s of speaking in a 7.89 s clip.
+- **Pending:** a real microphone in a normal room, and the page seen in a browser.
+
+**Key concept:** keep the LLM away from facts the code can measure. Measured numbers come from code, and the model only interprets the parts that need language. The same idea as the code-owned loop.
+
+**Interview question:** How do you detect pauses without a speech model?
+*Short answer:* Energy-based voice activity detection. Split the audio into short frames, compute each frame's RMS loudness, mark frames below a threshold as silence, and measure runs of silent frames between the first and last speech frame. The threshold is relative to the clip's own loud level so different microphones work. Its limits are that it can't tell speech from other loud noise and that it needs tuning; WebRTC VAD or Silero are the usual next steps.
+
+**Exercise:** record yourself answering once fluently and once with deliberate long pauses. Compare `pauses` and `longest_pause_s` in the transcript message, then try `RELATIVE_SILENCE` at 0.05 and 0.2 and see which one matches what you heard.
+
+**Common mistake:** keeping per-answer data in a list that is appended "only when there is data", next to a history that is rolled back by popping. The first rollback without data pops the wrong entry, and the summary then counts an answer that was cancelled.
