@@ -344,3 +344,54 @@ def test_llm_unavailable_at_connect_reports_and_closes(monkeypatch):
         assert "GEMINI_API_KEY" in ws.receive_json()["reason"]
         with pytest.raises(WebSocketDisconnect):
             ws.receive_json()
+
+
+# --- delivery feedback (measured, written by code) ---
+
+import math
+from array import array
+
+
+def tone_pcm(seconds: float) -> bytes:
+    n = round(seconds * SAMPLE_RATE)
+    return array("h", (round(8000 * math.sin(2 * math.pi * 220 * i / SAMPLE_RATE)) for i in range(n))).tobytes()
+
+
+def speak_pcm(ws, pcm: bytes) -> None:
+    ws.send_json({"type": "utterance_start", "sample_rate": SAMPLE_RATE})
+    ws.send_bytes(pcm)
+    ws.send_json({"type": "utterance_end"})
+
+
+def test_transcript_carries_measured_delivery_numbers(llm):
+    with client.websocket_connect("/ws") as ws:
+        start_interview(ws)
+        speak_pcm(ws, tone_pcm(2) + b"\x00\x00" * (SAMPLE_RATE * 3 // 2) + tone_pcm(2))  # 2 s, 1.5 s gap, 2 s
+        transcript = read_until(ws, "transcript")[-1]
+    d = transcript["delivery"]
+    assert d["pauses"] == 1 and abs(d["longest_pause_s"] - 1.5) < 0.06 and abs(d["speaking_s"] - 5.5) < 0.06
+    assert d["words"] == 6  # the fake transcript's words: "fake transcript (5500 ms of audio)"
+    assert d["fillers"] == 0
+
+
+def test_summary_has_a_code_written_delivery_line_for_completed_answers_only(monkeypatch):
+    provider = use_llm(monkeypatch)
+    with client.websocket_connect("/ws") as ws:
+        start_interview(ws)
+        speak_pcm(ws, tone_pcm(2))
+        read_until(ws, "state", state="listening")
+        ws.send_json({"type": "end"})
+        summary, _ = finish(ws)
+    line = summary["delivery"]
+    assert line.startswith("1 answer, 2 s on average; ") and "0 filler words" in line and "0 pauses" in line
+    rate = int(line.split("; ")[1].split()[0])
+    assert 177 <= rate <= 185  # 6 words in 2 s = 180, within one 30 ms frame (speaking time is counted in whole frames)
+    assert all("words per minute" not in m.text for m in provider.calls[-1])  # the LLM never sees the numbers
+
+
+def test_summary_without_answers_has_no_delivery_line(llm):
+    with client.websocket_connect("/ws") as ws:
+        start_interview(ws)
+        ws.send_json({"type": "end"})
+        summary, _ = finish(ws)
+    assert summary["delivery"] is None

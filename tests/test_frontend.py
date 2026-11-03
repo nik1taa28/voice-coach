@@ -51,3 +51,10 @@ def test_ending_state_keeps_the_closing_line_playing_and_the_summary_names_the_e
     for reason in ("question_limit", "time_limit", "bank_exhausted", "manual"):
         assert f"{reason}:" in html
     assert "provider === 'fallback'" in html  # the canned acknowledgement is not mistaken for a real or fake LLM reply
+
+
+def test_delivery_numbers_are_shown_with_their_caveats():
+    html = client.get("/").text
+    assert "msg.delivery" in html and "Delivery (measured)" in html
+    assert "lower bound" in html  # Whisper drops fillers: the page must not present the count as exact
+    assert "placeholder text" in html  # and must say when the numbers come from the fake ASR

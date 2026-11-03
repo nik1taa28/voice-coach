@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
+from backend.delivery import DeliveryStats
 from backend.llm.base import Message
 from backend.questions import DIFFICULTIES, Question, pick_question
 
@@ -55,6 +56,7 @@ class InterviewSession:
         self.current: Question | None = None  # the bank question being discussed
         self.followups_used = 0  # LLM follow-ups already asked about `current`
         self._asked: list[Question] = []  # bank questions asked so far, in order
+        self._delivery: list[DeliveryStats | None] = []  # exactly one entry per user message, so a rollback pops both
         self.question_count = DEFAULT_QUESTION_COUNT
         self.time_limit_s = DEFAULT_TIME_LIMIT_S
         self.started_at = 0.0  # monotonic clock reading at Start
@@ -67,6 +69,10 @@ class InterviewSession:
     @property
     def asked_questions(self) -> list[Question]:
         return list(self._asked)
+
+    @property
+    def delivery_stats(self) -> list[DeliveryStats]:
+        return [d for d in self._delivery if d is not None]
 
     def _require(self, *allowed: State, event: str) -> None:
         if self.state not in allowed:
@@ -105,6 +111,7 @@ class InterviewSession:
         self.current = None
         self.followups_used = 0
         self._asked = []
+        self._delivery = []
         self.question_count = question_count
         self.time_limit_s = time_limit_s
         self.started_at = time.monotonic() if now is None else now
@@ -115,7 +122,7 @@ class InterviewSession:
         return now - self.started_at >= self.time_limit_s
 
     def plan_opening(self, bank: list[Question], rng: random.Random | None = None) -> TurnPlan:
-        """The first bank question, or an immediate end if this topic and level has none."""
+        """The first bank question, or an immediate end if this topic has none at any level."""
         question = pick_question(bank, self.topic, self.difficulty, set(), rng)
         if question is None:
             return TurnPlan("end", None, EndReason.BANK_EXHAUSTED)
@@ -138,12 +145,13 @@ class InterviewSession:
             return TurnPlan("end", None, EndReason.BANK_EXHAUSTED)
         return TurnPlan("bank", question)
 
-    def add_user(self, text: str) -> None:
-        """listening -> thinking."""
+    def add_user(self, text: str, delivery: DeliveryStats | None = None) -> None:
+        """listening -> thinking. `delivery` (the answer's measured stats) is kept next to the message, so a rollback drops both."""
         self._require(State.LISTENING, event="answer")
         if not text.strip():
             raise SessionError("empty answer")
         self._history.append(Message("user", text.strip()))
+        self._delivery.append(delivery)
         self.state = State.THINKING
 
     def add_coach(self, text: str, plan: TurnPlan | None = None) -> None:
@@ -176,6 +184,7 @@ class InterviewSession:
             return
         if self._history[-1].role == "user":
             self._history.pop()
+            self._delivery.pop()  # the interrupted answer's stats go with it
         self.state = State.LISTENING
 
     def pause(self) -> None:

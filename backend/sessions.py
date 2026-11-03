@@ -93,7 +93,13 @@ def _round_or_none(value: float | None) -> float | None:
 
 
 def build_summary(
-    session_id: str, text: str, provider: str, ttft_ms: float | None, total_ms: float | None, end_reason: str | None = None
+    session_id: str,
+    text: str,
+    provider: str,
+    ttft_ms: float | None,
+    total_ms: float | None,
+    end_reason: str | None = None,
+    delivery: str | None = None,
 ) -> dict:
     return {
         "type": "summary",
@@ -101,6 +107,7 @@ def build_summary(
         "text": text,
         "provider": provider,
         "end_reason": end_reason,  # question_limit / time_limit / bank_exhausted / manual
+        "delivery": delivery,  # measured delivery line written by code (None without answers), never by the LLM
         "llm_ttft_ms": None if ttft_ms is None else round(ttft_ms, 1),
         "llm_total_ms": None if total_ms is None else round(total_ms, 1),
     }

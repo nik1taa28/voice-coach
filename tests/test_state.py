@@ -312,3 +312,34 @@ def test_plan_move_on_changes_nothing():
     s.plan_move_on(BIG_BANK, now=1.0)
     s.plan_move_on(BIG_BANK, now=1000.0)
     assert (s.state, s.history, s.asked_questions, s.followups_used) == before
+
+
+# --- delivery stats travel with their answer ---
+
+from backend.delivery import DeliveryStats
+
+STATS = DeliveryStats(words=10, answer_s=5, speaking_s=4, wpm=150, fillers=1, pauses=0, longest_pause_s=0)
+
+
+def test_delivery_stats_are_kept_per_answer_and_dropped_with_a_cancelled_answer():
+    s = started()
+    s.add_user("first", STATS)
+    s.add_coach("follow-up")
+    s.add_user("second, interrupted", STATS)
+    s.cancel_turn()
+    assert s.delivery_stats == [STATS]  # the summary must not count an answer the coach never replied to
+    s.add_user("no audio measured")  # e.g. a caller without stats: still one entry, so later rollbacks stay aligned
+    s.cancel_turn()
+    assert s.delivery_stats == [STATS]
+
+
+def test_a_new_start_clears_delivery_stats():
+    s = InterviewSession()
+    s.start("T", "easy")
+    s.add_coach("q")
+    s.add_user("a", STATS)
+    s.add_coach("closing", TurnPlan("end", None, EndReason.MANUAL))
+    s.finish()
+    s.state = State.IDLE  # a new connection would build a new session; this only checks start() resets the list
+    s.start("T", "easy")
+    assert s.delivery_stats == []

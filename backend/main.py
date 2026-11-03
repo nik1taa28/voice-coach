@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 from backend.asr import ASRError, get_asr_provider
 from backend.audio import AudioError, pcm16_duration_ms
 from backend.decision import FALLBACK_ACK, Decision, DecisionError, parse_decision
+from backend.delivery import analyze, session_line
 from backend.llm import LLMError, get_llm_provider
 from backend.logs import configure_logging, session_id_var
 from backend.metrics import Metrics
@@ -231,12 +233,15 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             metrics.count("turn_timeout")
             await send(build_error(session_id, "transcription timed out"))
             return
+        # Measured from the audio and the transcript; in a thread so a long answer never blocks the event loop
+        delivery = await asyncio.to_thread(analyze, reply["text"], pcm, rate)
+        reply["delivery"] = dataclasses.asdict(delivery)
         await send(reply)
         if session.state is State.LISTENING:  # an interview is running; idle = transcribe-only
             if not reply["text"].strip():
                 await send(build_error(session_id, "no speech recognized, please try again"))
             else:
-                session.add_user(reply["text"])
+                session.add_user(reply["text"], delivery)
                 await send_state()
                 await coach_turn(send, session, llm, tts, session_id, timeouts)
 
@@ -474,8 +479,9 @@ async def send_summary(send: SafeSender, session: InterviewSession, llm, session
     """One LLM call over the whole history. Not streamed to the client: it is sent once complete. Same retry rule as a reply."""
     history = session.history
     end_reason = session.end_reason.value
+    delivery = session_line(session.delivery_stats)  # written by code from measurements; the LLM never sees or states these
     if not any(m.role == "user" for m in history):
-        await send(build_summary(session_id, "No answers were recorded, so there is nothing to summarise.", "none", None, None, end_reason))
+        await send(build_summary(session_id, "No answers were recorded, so there is nothing to summarise.", "none", None, None, end_reason, delivery))
         return
     try:
         result = await stream_with_retry(lambda: llm.stream(build_summary_messages(session.topic, session.difficulty, history, session.asked_questions)), timeouts.llm_first_s, timeouts.summary_s)
@@ -484,4 +490,4 @@ async def send_summary(send: SafeSender, session: InterviewSession, llm, session
         await send(build_error(session_id, "summary timed out" if isinstance(exc, StageTimeout) else "summary failed"))
         return
     logger.info("summary done", extra={"fields": {"llm": llm.name, "attempts": result.attempts, "total_ms": round(result.total_ms)}})
-    await send(build_summary(session_id, result.text, llm.name, result.ttft_ms, result.total_ms, end_reason))
+    await send(build_summary(session_id, result.text, llm.name, result.ttft_ms, result.total_ms, end_reason, delivery))

@@ -240,6 +240,11 @@ function connect() {
       timingEl.textContent =
         `audio ${msg.audio_ms} ms | asr ${msg.asr_ms} ms | rtf ${msg.rtf} | ` +
         `stop->text ${roundTrip} ms (browser clock, includes network) | asr provider ${msg.provider}`;
+      if (msg.delivery) {
+        const d = msg.delivery;
+        timingEl.textContent += ` | delivery: ${d.words} words, ${d.wpm === null ? 'rate n/a' : d.wpm + ' wpm'}, ` +
+          `${d.fillers} fillers, ${d.pauses} pauses, ${d.speaking_s} s speaking`;
+      }
       showProvider('asr', msg.provider);
     } else if (msg.type === 'speak') {
       showProvider('tts', msg.provider);
@@ -260,6 +265,13 @@ function connect() {
     } else if (msg.type === 'summary') {
       const why = END_REASON_TEXT[msg.end_reason] || msg.end_reason;
       summaryEl.textContent = `Interview ended: ${why}.\n\nSummary (${msg.provider}):\n${msg.text}`;
+      if (msg.delivery) {
+        // Measured by the server, not written by the LLM. Caveats are shown with the numbers, not hidden in the docs.
+        summaryEl.textContent += `\n\nDelivery (measured): ${msg.delivery}\n` +
+          'Pauses come from the audio; words and fillers from the transcript. Speech recognition often drops "um" and ' +
+          '"uh", so the filler count is a lower bound' +
+          (warnings.has('asr') ? '; with the FAKE speech recognition, word count and rate describe placeholder text.' : '.');
+      }
       showProvider('llm', msg.provider);
     } else if (msg.type === 'error') {
       if (msg.reason === 'speech failed') { // only the voice failed: the reply keeps streaming as text, sentences already queued still play
