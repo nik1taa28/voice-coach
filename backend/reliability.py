@@ -28,7 +28,7 @@ class Timeouts:
 
     asr_s: float = 30.0
     llm_first_s: float = 10.0  # until the first piece arrives (TTFT)
-    llm_total_s: float = 30.0  # whole reply, includes our own forwarding and TTS (they run inline)
+    llm_total_s: float = 30.0  # whole reply (decisions are collected complete, then spoken: TTS is not inside this)
     tts_s: float = 5.0  # one sentence
     summary_s: float = 30.0
 

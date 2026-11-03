@@ -524,3 +524,67 @@ flowchart TD
 **Observed while building:**
 - Changing the opener broke about 25 tests, and several of them *hung* instead of failing: they waited for an error that could no longer happen because the opener no longer calls the LLM. A test that waits forever is worse than one that fails. Run suspect test files with a time limit (`perl -e 'alarm 30; exec @ARGV' ...`) to find the hanging one.
 - The FAKE-LLM warning in the page is driven by the provider name of each message. A new name (`bank`) would have cleared the warning by accident, so a test now pins that a bank line does not count as "the LLM is real".
+
+## Code-owned interview loop: the LLM decides one thing, the code decides the rest (2026-11-03)
+
+```mermaid
+flowchart TD
+  A[answer] --> N{"needs_decision?<br/>follow-ups left and time not up"}
+  N -- no --> M["move_on, canned ack<br/>(no LLM call)"]
+  N -- yes --> L["LLM: complete JSON<br/>{action, text}"]
+  L --> P{parse_decision}
+  P -- follow_up --> F[speak follow-up]
+  P -- move_on --> M
+  P -- "invalid / timeout / LLMError" --> X["move_on, canned ack<br/>decision_fallback += 1"] --> M
+  M --> E{"plan_move_on:<br/>time up? N asked? bank empty?"}
+  E -- no --> Q[ack + next bank question]
+  E -- yes --> C["ack + closing line<br/>ENDING -> summary -> ENDED"]
+```
+
+```mermaid
+sequenceDiagram
+  participant W as watchdog task
+  participant S as session
+  participant T as turn task
+  Note over W: sleep(started_at + limit - now)
+  W->>S: state LISTENING / PAUSED / THINKING?
+  W->>T: interrupt (cancel + rollback, like End)
+  W->>S: begin_ending(TIME_LIMIT)
+  W->>T: spawn closing_turn: closing line, summary, finish()
+```
+
+- **Problem:** the old loop asked a fixed 2 follow-ups whatever the answer, and the interview never ended by itself: the candidate had to press End.
+- **Now:** after each answer the LLM returns `{"action": "follow_up" | "move_on", "text": ...}`. The **code** enforces the cap (the model is not even asked once 2 follow-ups were used), picks the next bank question, and ends the interview after N questions (5/6/8/10, default 6), at the time limit (15 min), when the bank runs out, or on End. All of these go through a new `ENDING` state: closing line, summary with `end_reason`, then `ENDED`.
+- **Untrusted output:** `parse_decision` treats the reply like a form submitted by a stranger: JSON object, known action, non-empty text of at most 400 chars, no key point copied word for word. Anything else becomes `move_on` with "Thanks for that answer.", so a bad reply can never stall or derail a session.
+- **Time without sleeping:** the session takes `now` as an argument (a monotonic reading). Each end condition is a one-line unit test with a made-up clock. Only one WebSocket test waits in real time (0.2 s), and that is for the watchdog itself.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Who owns the loop | code; the LLM only picks follow_up / move_on | the LLM decides everything ("ask the next question when ready") | limits, order and endings are testable and cannot be talked out of; the model has less freedom to adapt the flow |
+| Streaming vs validation | wait for the complete JSON, validate, then speak | stream the `text` field with an incremental JSON parser | simple and honest; **follow-ups are no longer streamed**, so first sound now waits for the whole LLM reply (real cost: pending a Gemini run) |
+| Getting JSON | prompt + parser, Gemini unchanged | Gemini JSON mode (`responseMimeType`) | provider-agnostic (Ollama or the fake work the same); the model can still break format, so the fallback carries the load |
+| On a bad decision | move_on with a canned ack | retry the LLM; show an error and roll back | the candidate never sees an error and the session always progresses; one question may get fewer follow-ups than it deserved. No extra retry keeps free-tier quota |
+| Fallback and the error rate | fallback turn = `turn_ok`, plus a separate `decision_fallback` counter | count it as `turn_failed` | the turn did succeed for the user; but now `error_rate` alone would look healthy during a Gemini outage, so the dashboard shows the fallback tile next to it |
+| Time limit | wall time from Start, pauses included, hard (a running turn is cancelled) | pause the clock; finish the current turn first | simplest rule to state and test; a long pause uses up interview time |
+| Ending | separate `ENDING` state | jump straight to `ENDED` and summarise | the closing line and summary run where pause, record and start are all illegal, so nothing can interleave with them |
+| Question count menu | 5, 6, 8, 10 (6 default) | only 5/8/10 as first asked | a default that is not on the menu could not be chosen again in the UI |
+
+### Verified so far
+- 279 tests pass (`.venv/bin/python -m pytest -q`, run 2026-11-03, 3.80 s).
+- One real uvicorn run in demo mode with `INTERVIEW_TIME_LIMIT_S=2`: one answer, then the watchdog fired at 2.00 s and the messages came in the right order (`ending`, closing line, summary with `end_reason: time_limit`, `ended`).
+- **Pending:** real Gemini (does it return valid JSON, how often does it fall back, does it still avoid the key points?), the real latency cost of not streaming follow-ups, and the page seen in a browser.
+
+**Key concept:** LLM output is untrusted input. Validate it against a schema before it drives control flow, and give every failure a deterministic, safe default. The model then suggests and the code decides.
+
+**Interview question:** Your LLM is told "ask at most 2 follow-ups". Why do you also enforce that in code?
+*Short answer:* A prompt is a request, not a guarantee: the model can ignore it, and the next prompt change can break it. The cap is a business rule, so it belongs in code where a unit test pins it. The code does not even call the model once the cap is reached, which also saves quota and latency.
+
+**Exercise:** turn on Gemini JSON mode (`generationConfig.responseMimeType = "application/json"`) for decision requests only. Run a few real sessions and compare how often `decision_fallback` rises with and without it. Keep the parser either way.
+
+**Common mistake:** catching the LLM failure in the same `except` that also catches cancellation. Pause and End must still cancel and roll back the turn; only provider problems become `move_on`. `CancelledError` is a `BaseException`, so `except (LLMError, StageTimeout)` lets it through, and a broad `except Exception` would not be the fix either.
+
+**Observed while building:**
+- Several WebSocket tests waited for streamed deltas that no longer exist, so they hung instead of failing. The fix was a `threading.Event` the fake LLM sets at its stall point (TestClient runs the app in another thread), not a sleep.
+- "Thanks for that answer. Let's move on." read badly before "That was the last question", so the canned acknowledgement became just "Thanks for that answer.", which fits before both.
+- Awaiting the cancelled watchdog under `suppress(CancelledError)` could also swallow a cancellation of the WebSocket handler itself, so it is cancelled and not awaited.

@@ -45,7 +45,7 @@ flowchart LR
 | `TTSProvider`, `FakeTTS` (labelled beep), `BrowserTTS` (text only), `TTS_PROVIDER` selection (M3 piece 2) | Verified | `tests/test_tts.py` (9) |
 | WS wiring: `speak` per sentence, `first_sentence_ms` / `first_speak_ms`, one `speech failed` error per turn, `playback_started` (M3 piece 3) | Verified (tests, fake/scripted providers) | `tests/test_tts_ws.py` (14): order, speech starts before the LLM finishes, TTS failure keeps text and history, LLM failure mid-reply does not speak the tail |
 | Frontend speech queue, cancel rules, per-stage FAKE labels, browser-clock `stop->audio` (M3 piece 4) | Verified (by hand, one session each) | user-reported: fake beep heard, real browser voice heard, opener spoken without an extra click, voice cut off mid-sentence by Pause / Start recording, pause + resume worked. Browser: VS Code's built-in browser, user guessed Chromium ("chrome i guess"), **not confirmed**. Real Chrome, Safari, Firefox: **not tested** |
-| TTS runs inline in the LLM stream loop | Known limitation | a slow server-side TTS delays reading the next LLM piece, and `llm_total_ms` includes it. M4 added a per-sentence deadline (`TIMEOUT_TTS_S`) so it cannot hang forever, but it is still inline. A queue + worker task would fix the coupling; cancellation (M4) now makes that possible, no stated need yet |
+| TTS runs inline in the LLM stream loop | **No longer true (2026-11-03)** | was a known limitation: a slow server-side TTS delayed reading the next LLM piece, and `llm_total_ms` included it. Since the code-owned loop, the decision JSON is collected complete first and TTS runs after it (`Speaker` in `main.py`), so `llm_total_ms` no longer includes TTS. Numbers measured before this date (M3 budget table, `docs/performance.md`) were taken with the old coupling and are not comparable |
 | Streaming claim (M3) | Stated precisely | LLM -> splitter -> TTS dispatch is per piece / per sentence. Each TTS call waits for one **complete sentence**; not token-level TTS. ASR still waits for the full utterance |
 | Spoken summary | Not done | the end summary is text only |
 | Piper (server-side TTS) | Not planned for M3 | the interface allows it later (`SpokenChunk.audio` carries bytes) |
@@ -65,7 +65,7 @@ flowchart LR
 | `GET /dashboard` (M5 piece 4) | Verified (tests); by hand partly | `tests/test_dashboard.py` (4). By hand: dark mode fine, the "cannot read /metrics" banner appears when the server stops. The `asr` row filling on screen after a spoken answer: not confirmed |
 | Load test: Locust + `loadtest/sweep.sh` + `warmup.py` + `summarize.py` (M5 piece 5) | Verified (by running) | fake providers 1/10/50/100 users x 3 repeats, 0 failures; real Whisper 1-32 users, 0 failures. Load generator on the same laptop. The earlier 100-user shutdown hang was a test-tool bug (`ws.close()` swallows Locust's kill; fixed with `ws.shutdown()`); 24 of 24 runs since exited by themselves. Real Gemini under load: not planned. Whole real pipeline under load: pending |
 | Question bank: `question_bank.json` (65 questions, 7 topics), `questions.py` load/validate/pick (bank piece 1) | Verified (tests) | `tests/test_questions.py` (23): valid file, every topic has all 3 levels with at least 2 questions, bad entries and duplicate ids rejected. Content written by me, **not reviewed by anyone else**; difficulty labels are my judgement |
-| Bank-driven turns: `TurnPlan`, `plan_turn`, commit in `add_coach`; bank question spoken with no LLM call; LLM follow-ups (2 per question, `FOLLOWUPS_PER_QUESTION`); wrap-up line when a topic and level runs out; `GET /topics`; topic dropdown (bank piece 2) | Verified (tests + one real uvicorn run, fake providers) | `tests/test_state.py`, `test_llm_ws.py`, `test_cancel_ws.py`, `test_tts_ws.py`, `test_metrics_ws.py`, `test_llm.py`, `test_frontend.py`: 236 passed in total. Real server run (port 8001, demo mode): turns went bank, fake, fake, bank, fake; unknown topic rejected in tests. The dropdown in a browser: **not seen** |
+| Bank-driven turns: `TurnPlan`, `plan_turn`, commit in `add_coach`; bank question spoken with no LLM call; LLM follow-ups (2 per question, `FOLLOWUPS_PER_QUESTION`); wrap-up line when a topic and level runs out; `GET /topics`; topic dropdown (bank piece 2) | Verified (tests + one real uvicorn run, fake providers) | `tests/test_state.py`, `test_llm_ws.py`, `test_cancel_ws.py`, `test_tts_ws.py`, `test_metrics_ws.py`, `test_llm.py`, `test_frontend.py`: 236 passed in total. Real server run (port 8001, demo mode): turns went bank, fake, fake, bank, fake; unknown topic rejected in tests. The dropdown in a browser: **not seen**. **Superseded (2026-11-03):** `plan_turn`, the fixed follow-up count and the wrap-up line were replaced by the code-owned loop (section below) |
 | Follow-up prompt with key points; summary prompt lists the questions asked | Verified (by hand, 2 real Gemini sessions, user-reported) | Run 1 (data structures): one follow-up per turn, key points not read out, summary had the 4 parts and asked no question. It wrongly counted an unanswered last question against the candidate and stated a guess about a garbled sentence, so two rules were added to the summary system prompt (`backend/prompts.py`). Run 2 (operating systems, "I don't know" answers, last coach question unanswered): no mention of the unanswered question, no claim built on garbled words. One sample per case, not a distribution. Topic name is still only implied in the summary. Observed, not fixed: an answer cut off mid-sentence ("a thread is a unit of...") got a follow-up on the half answer |
 | Bank turns have no LLM timing | Stated | `coach_done.llm_ttft_ms` / `llm_total_ms` are `null` for bank lines and `llm_ttft` / `llm_total` metrics get no sample, so those stages now count only follow-ups. Earlier numbers in `docs/performance.md` measured LLM-written openers and are not changed |
 | Baseline report `docs/performance.md` and M5 learning notes (M5 piece 6) | Implemented | measured numbers only; open items listed in the report. `METRICS_WINDOW` (env, default 1000) lets a load test keep every sample of a step |
@@ -86,14 +86,14 @@ Client -> server:
 - `{"type":"utterance_start","sample_rate":16000}` (only 16000 accepted)
 - binary frames: raw PCM16 little-endian mono
 - `{"type":"utterance_end"}`
-- `{"type":"start","topic","difficulty"}` (difficulty: easy/medium/hard), `{"type":"pause"}`, `{"type":"resume"}`, `{"type":"end"}`
+- `{"type":"start","topic","difficulty","question_count"}` (difficulty: easy/medium/hard; `question_count`: 5, 6, 8 or 10, default 6 when omitted), `{"type":"pause"}`, `{"type":"resume"}`, `{"type":"end"}`
 - any other JSON object: echoed (M0 behavior)
 
 Server -> client:
 - `{"type":"transcript","session_id","text","provider","audio_ms","asr_ms","rtf"}`; `provider` is `fake` or `faster-whisper`
-- `{"type":"state","session_id","state"}`: idle / listening / thinking / paused / ended
-- `{"type":"coach_delta","session_id","text"}` (streamed pieces), then `{"type":"coach_done","session_id","text","provider","llm_ttft_ms","llm_total_ms"}`; on failure an `error` follows and the client must discard unfinished deltas
-- `{"type":"summary","session_id","text","provider","llm_ttft_ms","llm_total_ms"}`: sent once complete, not streamed; `provider` is `none` when no answers were recorded
+- `{"type":"state","session_id","state"}`: idle / listening / thinking / paused / ending / ended (`ending`: closing line and summary in progress, nothing else accepted)
+- `{"type":"coach_delta","session_id","text"}` (since the code-owned loop: **one delta with the whole line**; follow-ups are validated JSON and no longer streamed), then `{"type":"coach_done","session_id","text","provider","llm_ttft_ms","llm_total_ms"}`; on failure an `error` follows and the client must discard unfinished deltas. `provider` is `bank` (scripted line, no LLM call), `fallback` (the LLM failed, timed out or gave invalid output: canned acknowledgement), or the LLM name
+- `{"type":"summary","session_id","text","provider","end_reason","llm_ttft_ms","llm_total_ms"}`: sent once complete, not streamed; `provider` is `none` when no answers were recorded; `end_reason` is `question_limit` / `time_limit` / `bank_exhausted` / `manual`. A `state: ended` follows it
 - `{"type":"speak","session_id","seq","text","provider","tts_ms"}` plus `mime` and `audio_b64` when the server synthesised audio (`fake`); `provider` is `fake` or `browser`; `tts_ms` is `null` for `browser` (the server did no synthesis). One per sentence, in `seq` order, sent before `coach_done`. After an `error` with reason `coach reply failed` the client must discard queued speech as well as unfinished deltas
 - `coach_done` also carries `tts_provider`, `first_sentence_ms` (turn start -> first complete sentence) and `first_speak_ms` (turn start -> first `speak` sent, `null` if nothing was spoken); server clock
 - `{"type":"echo","session_id","data","server_ts"}`
@@ -104,6 +104,8 @@ Client -> server (M3): `{"type":"playback_started","stop_to_audio_ms":<0..600000
 Error reasons: `invalid JSON`, `JSON must be an object`, `audio received before utterance_start`, `utterance_end without utterance_start`, `no audio received`, `PCM16 data must have an even number of bytes`, `sample_rate must be 16000`, `utterance already in progress; ...`, `utterance longer than 60s` (sent once, further frames dropped until `utterance_end`), `transcription failed`, `coach reply failed`, `summary failed`, `LLM unavailable: ...` (connection then closes), `cannot <event> while <state>`, `empty answer`, `no speech recognized, please try again`, topic/difficulty validation messages, `speech failed` (sent once per turn; the text and history are unaffected and sentences already queued still play), `stop_to_audio_ms must be a number between 0 and 600000`.
 
 Added in M4: `transcription timed out`, `coach reply timed out`, `summary timed out`, `turn cancelled` (Pause/End interrupted a running turn; the client discards partial text and queued speech, like for `coach reply failed`), `internal error` (an unexpected exception inside a turn; logged with a traceback; the session stays usable), `busy: the previous request is still being processed` (a second utterance or `start` while ASR or a turn is running). A cancelled opener returns the session to `idle`, so Pause then also reports `cannot pause while idle`, preceded by a `state` message.
+
+Since the code-owned loop (2026-11-03): `coach reply failed` and `coach reply timed out` are no longer sent, because an LLM problem during a decision falls back to move_on. New: `question_count must be one of 5, 6, 8, 10`.
 
 ## Reply path and latency budget (M3)
 
@@ -159,13 +161,61 @@ flowchart TD
 | Failure | What happens | Retried? |
 |---|---|---|
 | ASR error / timeout | `transcription failed` / `transcription timed out`; state unchanged; user records again | no |
-| LLM error / timeout **before** the first piece | one retry after 0.3 s; invisible to the client if it works | yes (once) |
-| LLM error / timeout **after** the first piece | `coach reply failed` / `coach reply timed out`; `fail_turn` rollback | no (would repeat text already shown) |
+| LLM error / timeout **before** the first piece | one retry after 0.3 s; invisible to the client if it works. If the retry fails too: fallback move_on (since 2026-11-03) | yes (once) |
+| LLM error / timeout **after** the first piece | since 2026-11-03: fallback move_on with the canned acknowledgement, counted as `decision_fallback` (was: `coach reply failed` + rollback) | no (rule kept, although pieces are no longer shown, so a retry would now be safe) |
+| LLM reply is not a valid decision (not JSON, unknown action, empty / too long text, key point copied) | fallback move_on, `decision_fallback`; the raw reply (first 200 chars) is logged | no |
 | TTS error / timeout | `speech failed` once; rest of the reply is text only | no |
-| Summary error / timeout | `summary failed` / `summary timed out`; the session is already `ended` | once, before any output (same rule) |
+| Summary error / timeout | `summary failed` / `summary timed out`; the session is `ending` and still moves to `ended` | once, before any output (same rule) |
 | Pause / End during a turn | task cancelled, `turn cancelled`, unanswered message dropped, then the event applies | n/a |
-| Pause / End while `ended` | rejected; the summary task is left running | n/a |
+| Pause / End while `ending` or `ended` | rejected; the closing line and summary task are left running | n/a |
+| Time limit reached | watchdog task: a running turn is cancelled and rolled back (like End), then `ending` with `end_reason: time_limit` | n/a |
 | Client disconnect | `finally` cancels the task; the LLM HTTP stream is closed | n/a |
 | Unexpected exception in a turn | `internal error`, logged with traceback, rollback, session usable | no |
 
 Default deadlines (guesses, env-overridable; only real sample so far: Gemini TTFT 3129 ms once): ASR 30 s, LLM first piece 10 s, LLM total 30 s, TTS 5 s per sentence, summary 30 s.
+
+## Code-owned interview loop (2026-11-03)
+
+The code decides the structure of the interview; the LLM only chooses `follow_up` or `move_on` and writes that one line.
+
+```mermaid
+stateDiagram-v2
+  [*] --> IDLE
+  IDLE --> THINKING: start (topic, level, question_count)
+  THINKING --> LISTENING: coach line done (bank question / follow-up)
+  LISTENING --> THINKING: answer
+  LISTENING --> PAUSED: pause
+  PAUSED --> LISTENING: resume
+  THINKING --> LISTENING: turn cancelled (rollback)
+  THINKING --> IDLE: opener cancelled
+  THINKING --> ENDING: closing line done (question_limit / time_limit / bank_exhausted)
+  LISTENING --> ENDING: End / time limit
+  PAUSED --> ENDING: End / time limit
+  ENDING --> ENDED: summary sent (or failed)
+  ENDED --> [*]
+```
+
+```mermaid
+flowchart TD
+  A[answer transcribed] --> N{follow-ups left<br/>and time not up?}
+  N -- no --> M[move_on, canned ack<br/>no LLM call]
+  N -- yes --> L[LLM decision<br/>full JSON, deadline, 1 retry]
+  L --> P{parse_decision}
+  P -- follow_up --> F[speak follow-up<br/>followups_used += 1] --> W[LISTENING]
+  P -- move_on --> M2[move_on, LLM ack]
+  P -- invalid / timeout / LLMError --> M3[move_on, canned ack<br/>decision_fallback]
+  M & M2 & M3 --> E{time up? N asked? bank empty?}
+  E -- no --> Q[ack + next bank question] --> W
+  E -- yes --> C[ack + closing line] --> S[ENDING: summary] --> D[ENDED]
+```
+
+| Part | Status | Evidence |
+|---|---|---|
+| Bank file `data/question_bank.json`, validated at startup (`load_bank`, `QuestionBankError`) | Verified (tests + real uvicorn) | `tests/test_questions.py`; a pinned-path test keeps the loader and the Dockerfile's `COPY data` in step. Real server on port 8003 served all 7 topics from `/topics` |
+| `parse_decision` (`backend/decision.py`): JSON object, known action, non-empty text of at most 400 chars, no key point copied word for word | Verified (tests) | `tests/test_decision.py` (15). The key-point check only catches verbatim copies; a paraphrase passes, so the prompt is still the main defence |
+| State machine: `ENDING`, `EndReason`, `plan_opening`, `needs_decision`, `plan_move_on`, `begin_ending`, `finish`; `question_count` in {5, 6, 8, 10}, default 6; time limit default 900 s, pauses included | Verified (tests) | `tests/test_state.py`: each end condition with an injected clock, the follow-up cap, no repeats, nothing but `finish` accepted while ending |
+| Loop wired in `main.py`: `decide` (fallback on invalid / timeout / error), `coach_turn`, `closing_turn`, `finish_interview`, time-limit watchdog task | Verified (tests + one real uvicorn run, fake providers) | `tests/test_llm_ws.py` (23): seeded order without repeats, cap of 2, each end condition, bad output x4, LLM error, LLM timeout. Full suite: **279 passed in 3.80s**. Real uvicorn, `INTERVIEW_TIME_LIMIT_S=2`: answered once, then the watchdog fired at 2.00 s: `ending`, closing line, summary with `end_reason: time_limit`, `ended`; no traceback in the log |
+| Follow-ups no longer streamed to the client | Stated (trade-off) | the decision is spoken only after the full JSON arrived and passed validation, so `first_speak_ms` for a follow-up now includes the whole LLM reply. `tests/test_tts_ws.py` pins this (one delta per line). **Effect on real latency: pending** (needs a real Gemini run) |
+| `decision_fallback` counter and dashboard tile | Verified (tests) | a fallback turn is `turn_ok` (the candidate got a reply) and is **not** in `error_rate`; LLM trouble shows in this counter instead. `tests/test_metrics_ws.py`, `tests/test_dashboard.py` |
+| Frontend: question-count picker, `ending` state ("wrapping up…"), end reason above the summary | Implemented (string tests only) | `tests/test_frontend.py`. **Not seen in a browser yet** |
+| Real Gemini returning valid decision JSON | **Pending** | prompt + parser only, no Gemini JSON mode. Unknown how often real replies fall back |

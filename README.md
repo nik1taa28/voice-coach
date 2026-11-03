@@ -48,10 +48,10 @@ flowchart LR
 ```
 
 - **Providers behind small interfaces** (`typing.Protocol`), each with a deterministic fake used by demo mode and tests.
-- **Honest streaming:** audio is streamed in, but ASR waits for the whole utterance. The LLM reply streams in pieces, and each *complete sentence* goes to TTS while the model writes the next one. It is not token-level TTS.
+- **Honest streaming:** audio is streamed in, but ASR waits for the whole utterance. The LLM streams its reply to the server, but **follow-ups are not streamed to you**: the reply is a JSON decision that must be complete and valid before anything is said. Then each sentence goes to TTS in turn. (Before the code-owned loop, sentence 1 was spoken while the model wrote sentence 2; that was given up for validation.)
 - **State machine** (`session_state.py`): idle, listening, thinking, paused, ended. Every event is checked in one place; history is written only when a reply is complete.
 - **Reliability (M4):** each answer runs as a cancellable task so the server keeps reading Pause / End / disconnect. Per-stage deadlines; the LLM is retried once, only before its first piece (a later retry would repeat text the user already saw); a closed tab cancels the work and closes the upstream stream.
-- **Question bank:** the main questions are curated data (`data/question_bank.json`), spoken word for word with no LLM call. The LLM only writes follow-ups (default 2 per question, `FOLLOWUPS_PER_QUESTION`) and the end summary, and sees the question's key points so it can probe what you missed. The session plans each turn first and commits the plan only when the turn succeeds, so a failed or cancelled turn changes nothing.
+- **Question bank and a code-owned loop:** the main questions are curated data (`data/question_bank.json`, validated at startup), spoken word for word with no LLM call and never repeated in a session. After each answer the LLM returns `{"action": "follow_up" | "move_on", "text": ...}`, seeing the question's key points as hidden context. The **code** validates that JSON, caps follow-ups (at most 2, `FOLLOWUPS_PER_QUESTION`; the model is not asked once the cap is reached), and falls back to "Thanks for that answer." plus the next question on invalid output, a timeout or an error. The interview ends by itself after 5/6/8/10 questions (default 6), at the time limit (`INTERVIEW_TIME_LIMIT_S`, default 15 min), or when the bank runs out, or when you press End, then goes through an `ending` state: closing line, summary, closed.
 - **Timing:** server stages use `time.perf_counter()`. The browser measures stop-press to first sound on its own clock; the two clocks are never mixed.
 
 Full detail, protocol and per-part status (Planned / Implemented / Verified): [docs/architecture.md](docs/architecture.md). Design decisions and what I learned: [docs/learning-notes.md](docs/learning-notes.md).
@@ -101,7 +101,8 @@ Publish the port on `127.0.0.1` only: `/metrics` has no authentication. To use r
 
 - The deadlines (ASR 30 s, LLM first piece 10 s, LLM total 30 s, TTS 5 s per sentence) are starting guesses, overridable with `TIMEOUT_*` variables. They are not tuned from data.
 - A timed-out Whisper call cannot be killed: its worker thread keeps using CPU until it finishes.
-- TTS runs inline in the LLM stream loop, so a slow server-side TTS delays reading the LLM.
+- Follow-ups wait for the complete LLM reply before the first word is spoken (validation needs the whole JSON). How much later first sound comes with real Gemini is **not measured yet**.
+- How often real Gemini returns invalid decision JSON (and so falls back) is **not measured yet**; the dashboard's "LLM fallbacks" tile counts it, and fallbacks are not in the error rate.
 - No fallback providers (for example a second LLM). The only fallbacks are the LLM retry and a text-only reply when TTS fails.
 - Tested in VS Code's built-in browser only (probably Chromium, not confirmed). Real Chrome, Safari and Firefox are untested. `speechSynthesis` behaves differently across them.
 - The spoken summary is text only. The tail of the audio (under about 43 ms) is dropped when recording stops.
@@ -141,4 +142,5 @@ Dockerfile, .github/workflows/ci.yml
 | M5 structured logs, `/metrics`, latency dashboard, load test, baseline report | done |
 | M6 Docker, GitHub Actions CI, README numbers | written; Docker build and the GitHub run are pending |
 | Curated question bank (JSON): bank questions, LLM follow-ups, `GET /topics`, topic dropdown | done; two real Gemini sessions checked by hand |
+| Code-owned loop: JSON follow_up / move_on decisions with fallback, follow-up cap, automatic ending (count, time, bank), `ending` state | done (279 tests, one real-server run in demo mode); real Gemini run pending |
 | Delivery feedback (words per minute, fillers, pauses) | planned |
