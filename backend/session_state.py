@@ -1,5 +1,7 @@
-"""Interview session state machine. Pure: no FastAPI, no I/O, so every transition is unit testable."""
+"""Interview session state machine. Pure: no FastAPI, no I/O, so every transition is unit testable.
+Time comes in as a `now` argument (a monotonic clock reading), so end conditions are tested without sleeping."""
 import random
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
@@ -8,6 +10,16 @@ from backend.llm.base import Message
 from backend.questions import DIFFICULTIES, Question, pick_question
 
 MAX_TOPIC_CHARS = 80
+QUESTION_COUNTS = (5, 6, 8, 10)  # bank questions per interview the client may pick
+DEFAULT_QUESTION_COUNT = 6
+DEFAULT_TIME_LIMIT_S = 15 * 60.0  # wall time from Start, pauses included
+
+
+class EndReason(str, Enum):
+    QUESTION_LIMIT = "question_limit"
+    TIME_LIMIT = "time_limit"
+    BANK_EXHAUSTED = "bank_exhausted"
+    MANUAL = "manual"
 
 
 class SessionError(ValueError):
@@ -18,8 +30,9 @@ class SessionError(ValueError):
 class TurnPlan:
     """What the coach does next. Decided before the turn runs, applied to the session only if the turn succeeds."""
 
-    kind: Literal["bank", "followup", "wrapup"]  # bank: say the next bank question; followup: LLM probes the current one; wrapup: bank exhausted
-    question: Question | None  # the bank question (new for "bank", current for "followup", None for "wrapup")
+    kind: Literal["bank", "followup", "wrapup", "end"]  # bank: next bank question; followup: LLM probes the current one; end: closing line
+    question: Question | None  # the bank question (new for "bank", current for "followup", None otherwise)
+    end_reason: EndReason | None = None  # set only for "end"
 
 
 class State(str, Enum):
@@ -27,6 +40,7 @@ class State(str, Enum):
     LISTENING = "listening"  # waiting for the candidate's answer
     THINKING = "thinking"  # ASR / LLM work in progress
     PAUSED = "paused"
+    ENDING = "ending"  # closing line said, summary being written; nothing else is accepted
     ENDED = "ended"
 
 
@@ -41,6 +55,10 @@ class InterviewSession:
         self.current: Question | None = None  # the bank question being discussed
         self.followups_used = 0  # LLM follow-ups already asked about `current`
         self._asked: list[Question] = []  # bank questions asked so far, in order
+        self.question_count = DEFAULT_QUESTION_COUNT
+        self.time_limit_s = DEFAULT_TIME_LIMIT_S
+        self.started_at = 0.0  # monotonic clock reading at Start
+        self.end_reason: EndReason | None = None
 
     @property
     def history(self) -> list[Message]:
@@ -58,7 +76,15 @@ class InterviewSession:
         """Recording is allowed while listening, and while idle (M1 transcribe-only mode: no LLM is called)."""
         self._require(State.IDLE, State.LISTENING, event="record")
 
-    def start(self, topic: object, difficulty: object, known_topics: list[str] | None = None) -> None:
+    def start(
+        self,
+        topic: object,
+        difficulty: object,
+        known_topics: list[str] | None = None,
+        question_count: object = DEFAULT_QUESTION_COUNT,
+        time_limit_s: float = DEFAULT_TIME_LIMIT_S,
+        now: float | None = None,
+    ) -> None:
         """idle -> thinking (the opening question is being prepared). With known_topics, the topic must be one of them."""
         self._require(State.IDLE, event="start")
         if not isinstance(topic, str) or not topic.strip():
@@ -69,12 +95,48 @@ class InterviewSession:
             raise SessionError("unknown topic: pick one from the list")
         if difficulty not in DIFFICULTIES:
             raise SessionError(f"difficulty must be one of {', '.join(DIFFICULTIES)}")
+        # bool is an int subclass and 6.0 == 6, so check the type first, then membership
+        if type(question_count) is not int or question_count not in QUESTION_COUNTS:
+            raise SessionError(f"question_count must be one of {', '.join(map(str, QUESTION_COUNTS))}")
+        if not time_limit_s > 0:
+            raise SessionError("time limit must be greater than 0")
         self.topic = topic.strip()
         self.difficulty = difficulty
         self.current = None
         self.followups_used = 0
         self._asked = []
+        self.question_count = question_count
+        self.time_limit_s = time_limit_s
+        self.started_at = time.monotonic() if now is None else now
+        self.end_reason = None
         self.state = State.THINKING
+
+    def time_up(self, now: float) -> bool:
+        return now - self.started_at >= self.time_limit_s
+
+    def plan_opening(self, bank: list[Question], rng: random.Random | None = None) -> TurnPlan:
+        """The first bank question, or an immediate end if this topic and level has none."""
+        question = pick_question(bank, self.topic, self.difficulty, set(), rng)
+        if question is None:
+            return TurnPlan("end", None, EndReason.BANK_EXHAUSTED)
+        return TurnPlan("bank", question)
+
+    def needs_decision(self, followups_per_question: int, now: float) -> bool:
+        """Ask the LLM follow_up / move_on only while follow-ups are left and time is not up. Otherwise the code moves on
+        without an LLM call: the model is never trusted to respect the cap."""
+        return self.current is not None and self.followups_used < followups_per_question and not self.time_up(now)
+
+    def plan_move_on(self, bank: list[Question], rng: random.Random | None = None, now: float | None = None) -> TurnPlan:
+        """After move_on: the next bank question, or the end. Checked in this order: time, question count, bank."""
+        now = time.monotonic() if now is None else now
+        if self.time_up(now):
+            return TurnPlan("end", None, EndReason.TIME_LIMIT)
+        if len(self._asked) >= self.question_count:
+            return TurnPlan("end", None, EndReason.QUESTION_LIMIT)
+        question = pick_question(bank, self.topic, self.difficulty, {q.id for q in self._asked}, rng)
+        if question is None:
+            return TurnPlan("end", None, EndReason.BANK_EXHAUSTED)
+        return TurnPlan("bank", question)
 
     def plan_turn(self, bank: list[Question], followups_per_question: int, rng: random.Random | None = None) -> TurnPlan:
         """Decide the coach's next move. Pure: it changes nothing, so a turn that fails or is cancelled leaves the session as it was."""
@@ -100,6 +162,10 @@ class InterviewSession:
         self._history.append(Message("assistant", text.strip()))
         self.state = State.LISTENING
         if plan is None:
+            return
+        if plan.kind == "end":  # the closing line was said: no more answers
+            self.end_reason = plan.end_reason
+            self.state = State.ENDING
             return
         if plan.kind == "bank" and plan.question is not None:
             self.current = plan.question
@@ -137,4 +203,16 @@ class InterviewSession:
 
     def end(self) -> None:
         self._require(State.LISTENING, State.PAUSED, event="end")
+        self.state = State.ENDED
+
+    def begin_ending(self, reason: EndReason) -> None:
+        """listening / paused -> ending: End pressed, or the time limit fired while no turn was running.
+        (An automatic end during a turn goes through add_coach with an "end" plan instead.)"""
+        self._require(State.LISTENING, State.PAUSED, event="end")
+        self.end_reason = reason
+        self.state = State.ENDING
+
+    def finish(self) -> None:
+        """ending -> ended, once the summary was sent (or failed). The session is closed."""
+        self._require(State.ENDING, event="finish")
         self.state = State.ENDED
