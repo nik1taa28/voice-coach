@@ -24,11 +24,15 @@
 </head>
 <body>
 <h1>Voice Coach</h1>
-<p>Pick a topic and level, start, and answer by voice. The coach asks a question from the question bank, then asks follow-ups about your answers.</p>
+<p>Pick a topic, level and number of questions, start, and answer by voice. The coach asks questions from the question bank and may follow up on your answers. The interview ends by itself after the chosen number of questions or at the time limit (15 minutes by default), or when you press End.</p>
 <div id="setup">
   <select id="topic" aria-label="Topic" disabled><option>loading topics…</option></select>
   <select id="difficulty" aria-label="Difficulty">
     <option>easy</option><option selected>medium</option><option>hard</option>
+  </select>
+  <select id="count" aria-label="Number of questions">
+    <option value="5">5 questions</option><option value="6" selected>6 questions</option>
+    <option value="8">8 questions</option><option value="10">10 questions</option>
   </select>
   <button id="start" disabled>Start interview</button>
 </div>
@@ -103,9 +107,16 @@ const FAKE_TEXT = {
   llm: 'FAKE coach: placeholder text, not real coaching.',
   tts: 'FAKE voice: a beep, not speech.',
 };
+const END_REASON_TEXT = {
+  question_limit: 'all your questions were asked',
+  time_limit: 'the time limit was reached',
+  bank_exhausted: 'no more questions for this topic and level',
+  manual: 'you pressed End',
+};
 function renderWarn() { warnEl.textContent = [...warnings.values()].join(' '); }
 function showProvider(kind, provider) {
-  if (provider === 'none' || provider === 'bank') return; // no LLM call happened (empty summary, or a question-bank line): says nothing about the provider
+  // No usable LLM reply (empty summary, a question-bank line, or the canned fallback): says nothing about the provider
+  if (provider === 'none' || provider === 'bank' || provider === 'fallback') return;
   if (provider === 'fake') warnings.set(kind, FAKE_TEXT[kind]); else warnings.delete(kind);
   renderWarn();
 }
@@ -218,8 +229,10 @@ function connect() {
     } else if (msg.type === 'state') {
       state = msg.state;
       if (state === 'listening') busy = false;
-      if (state === 'paused' || state === 'ended' || state === 'idle') cancelSpeech();
-      statusEl.textContent = `session ${msg.session_id.slice(0, 8)}: ${state}`;
+      // Not on 'ending' / 'ended': the closing line must still play. An End that interrupted a reply already sent an error,
+      // and every error discards queued speech.
+      if (state === 'paused' || state === 'idle') cancelSpeech();
+      statusEl.textContent = `session ${msg.session_id.slice(0, 8)}: ${state === 'ending' ? 'wrapping up…' : state}`;
       refresh();
     } else if (msg.type === 'transcript') {
       const roundTrip = Math.round(performance.now() - stopPressedAt);
@@ -238,12 +251,15 @@ function connect() {
       if (!coachLine) coachLine = addLine('', 'coach');
       coachLine.textContent = `Coach: ${msg.text}`;
       coachLine = null;
-      const llmTiming = msg.llm_ttft_ms === null ? 'from the question bank, no LLM call' : `llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms`;
+      const llmTiming = msg.provider === 'fallback' ? 'LLM failed or gave invalid output: canned acknowledgement'
+        : msg.llm_ttft_ms === null ? 'from the question bank, no LLM call'
+        : `llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms (complete before speaking: follow-ups are not streamed)`;
       timingEl.textContent += ` | ${llmTiming} | provider ${msg.provider}` +
         ` | tts ${msg.tts_provider}: first sentence ${msg.first_sentence_ms} ms, first speak sent ${msg.first_speak_ms} ms (server, from turn start)`;
       showProvider('llm', msg.provider);
     } else if (msg.type === 'summary') {
-      summaryEl.textContent = `Summary (${msg.provider}):\n${msg.text}`;
+      const why = END_REASON_TEXT[msg.end_reason] || msg.end_reason;
+      summaryEl.textContent = `Interview ended: ${why}.\n\nSummary (${msg.provider}):\n${msg.text}`;
       showProvider('llm', msg.provider);
     } else if (msg.type === 'error') {
       if (msg.reason === 'speech failed') { // only the voice failed: the reply keeps streaming as text, sentences already queued still play
@@ -303,7 +319,9 @@ toggle.onclick = () => (recording ? stopRecording() : startRecording());
 startBtn.onclick = () => {
   cancelSpeech(); warnings.clear(); renderWarn();
   list.textContent = ''; summaryEl.textContent = ''; timingEl.textContent = '';
-  ws.send(JSON.stringify({ type: 'start', topic: $('topic').value, difficulty: $('difficulty').value }));
+  ws.send(JSON.stringify({
+    type: 'start', topic: $('topic').value, difficulty: $('difficulty').value, question_count: Number($('count').value),
+  }));
 };
 pauseBtn.onclick = () => ws.send(JSON.stringify({ type: 'pause' }));
 resumeBtn.onclick = () => ws.send(JSON.stringify({ type: 'resume' }));
