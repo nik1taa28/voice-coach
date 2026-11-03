@@ -139,5 +139,5 @@ Dockerfile, .github/workflows/ci.yml
 | M0 skeleton, M1 mic to ASR, M2 LLM + state machine, M3 TTS + pipeline, M4 reliability | done |
 | M5 structured logs, `/metrics`, latency dashboard, load test, baseline report | done |
 | M6 Docker, GitHub Actions CI, README numbers | written; Docker build and the GitHub run are pending |
-| Curated question bank (JSON): bank questions, LLM follow-ups, `GET /topics`, topic dropdown | done (tests and a demo-mode server run); real Gemini run pending |
+| Curated question bank (JSON): bank questions, LLM follow-ups, `GET /topics`, topic dropdown | done; two real Gemini sessions checked by hand |
 | Delivery feedback (words per minute, fillers, pauses) | planned |

@@ -27,7 +27,11 @@ _SUMMARY_SYSTEM = (
     "{tag} You are an experienced interview coach writing feedback for a candidate after a mock interview. "
     "Topic: {topic}. Difficulty: {difficulty}. Judge the answers against that level, not against a perfect answer. "
     "You are not interviewing any more: never ask a question. Use only what is in the conversation and do not invent "
-    "answers the candidate did not give."
+    "answers the candidate did not give. "
+    "If the last coach message is a question with no candidate reply after it, the interview ended before it could be "
+    "answered: do not mention it or count it against the candidate. "
+    "The candidate's words come from speech recognition and may contain mishearings: when a sentence is garbled or "
+    "unclear, do not claim the candidate said something specific or wrong; say it was unclear instead."
 )
 # The request is a final USER turn on purpose. Put in the system prompt alone, the instruction lost: the conversation ended
 # with the coach's own question, and the model carried on as the coach and asked another question instead of summarising.
