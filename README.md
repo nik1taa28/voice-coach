@@ -1,6 +1,6 @@
 # Voice Coach: a spoken mock-interview coach
 
-The coach asks an interview question out loud. You answer into your microphone. The app transcribes it, an LLM writes a short follow-up, and the app speaks it. Controls: start / pause / end, topic and difficulty, a live transcript, and a short end summary.
+The coach asks an interview question out loud, taken from a curated question bank. You answer into your microphone. The app transcribes it, an LLM writes a short follow-up about your answer, and the app speaks it. Controls: start / pause / end, topic and difficulty, a live transcript, and a short end summary.
 
 Built as a portfolio project to practise async Python, WebSockets, provider interfaces, reliability and testing. It is deliberately small: a plain prompt plus conversation history, no RAG, no agent framework, no paid services.
 
@@ -51,6 +51,7 @@ flowchart LR
 - **Honest streaming:** audio is streamed in, but ASR waits for the whole utterance. The LLM reply streams in pieces, and each *complete sentence* goes to TTS while the model writes the next one. It is not token-level TTS.
 - **State machine** (`session_state.py`): idle, listening, thinking, paused, ended. Every event is checked in one place; history is written only when a reply is complete.
 - **Reliability (M4):** each answer runs as a cancellable task so the server keeps reading Pause / End / disconnect. Per-stage deadlines; the LLM is retried once, only before its first piece (a later retry would repeat text the user already saw); a closed tab cancels the work and closes the upstream stream.
+- **Question bank:** the main questions are curated data (`question_bank.json`), spoken word for word with no LLM call. The LLM only writes follow-ups (default 2 per question, `FOLLOWUPS_PER_QUESTION`) and the end summary, and sees the question's key points so it can probe what you missed. The session plans each turn first and commits the plan only when the turn succeeds, so a failed or cancelled turn changes nothing.
 - **Timing:** server stages use `time.perf_counter()`. The browser measures stop-press to first sound on its own clock; the two clocks are never mixed.
 
 Full detail, protocol and per-part status (Planned / Implemented / Verified): [docs/architecture.md](docs/architecture.md). Design decisions and what I learned: [docs/learning-notes.md](docs/learning-notes.md).
@@ -61,7 +62,7 @@ Full detail, protocol and per-part status (Planned / Implemented / Verified): [d
 .venv/bin/python -m pytest -q
 ```
 
-186 tests pass at the time of writing: unit tests, plus WebSocket tests using slow and failing fakes (hung or flaky LLM, hung ASR/TTS, Pause/End mid-reply, disconnect), and the metrics, logging and dashboard tests added in M5. The same suite passed in a clean virtual environment built the way CI builds it (186 passed). Note that `tests/test_whisper.py` needs numpy, which comes with `requirements-asr.txt`. The suite has no per-test timeout; if one hangs, run it with `-o faulthandler_timeout=15` to see where.
+236 tests pass at the time of writing (`.venv/bin/python -m pytest -q`, run on 2026-11-03): unit tests, plus WebSocket tests using slow and failing fakes (hung or flaky LLM, hung ASR/TTS, Pause/End mid-reply, disconnect), and the metrics, logging and dashboard tests added in M5. An earlier version of the suite (186 tests) passed in a clean virtual environment built the way CI builds it; the current 236 have not been re-run that way. Note that `tests/test_whisper.py` needs numpy, which comes with `requirements-asr.txt`. The suite has no per-test timeout; if one hangs, run it with `-o faulthandler_timeout=15` to see where.
 
 ## Measured (honest numbers)
 
@@ -105,7 +106,8 @@ Publish the port on `127.0.0.1` only: `/metrics` has no authentication. To use r
 - Tested in VS Code's built-in browser only (probably Chromium, not confirmed). Real Chrome, Safari and Firefox are untested. `speechSynthesis` behaves differently across them.
 - The spoken summary is text only. The tail of the audio (under about 43 ms) is dropped when recording stops.
 - Not yet verified with real Gemini or Whisper through the M4 task path, and the whole real pipeline has not been timed.
-- The first interview question is written by the LLM. A curated question bank is planned (after M6).
+- The question bank has 65 questions in 7 topics, written by me and not reviewed by anyone else; the difficulty labels are my own judgement. Questions are picked at random without repeats; when a topic and level runs out, the coach says so and you press End.
+- Not yet run with real Gemini: whether the model keeps to the key points, avoids reading them out, and stays on the question is **unverified** (the fake LLM cannot show it).
 - No limits across sessions: under real Whisper, extra users only wait longer (see Measured).
 
 ## Project layout
@@ -119,7 +121,9 @@ backend/
   metrics.py         in-memory p50/p95 per stage, outcome counters (pure)
   logs.py            JSON log lines with the session id (contextvar)
   sentences.py       streaming sentence splitter
-  prompts.py         prompt + history window
+  prompts.py         prompts (follow-up with key points, end summary) + history window
+  questions.py       curated question bank: load, validate, pick (pure)
+  question_bank.json the questions: topic, difficulty, key points
   asr/ llm/ tts/     provider interface + fake + real implementations
 frontend/            index.html (the app) and dashboard.html, plain HTML + vanilla JS
 loadtest/            Locust file, sweep/warm-up/summary scripts, raw results
@@ -135,4 +139,5 @@ Dockerfile, .github/workflows/ci.yml
 | M0 skeleton, M1 mic to ASR, M2 LLM + state machine, M3 TTS + pipeline, M4 reliability | done |
 | M5 structured logs, `/metrics`, latency dashboard, load test, baseline report | done |
 | M6 Docker, GitHub Actions CI, README numbers | written; Docker build and the GitHub run are pending |
-| Curated question bank (JSON), then delivery feedback | planned |
+| Curated question bank (JSON): bank questions, LLM follow-ups, `GET /topics`, topic dropdown | done (tests and a demo-mode server run); real Gemini run pending |
+| Delivery feedback (words per minute, fillers, pauses) | planned |

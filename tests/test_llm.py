@@ -120,3 +120,44 @@ def test_gemini_summary_payload_ends_with_a_user_turn():
     contents = GeminiLLM._payload(build_summary_messages("Python", "easy", ended_history(3)))["contents"]
     assert contents[-1]["role"] == "user"
     assert "Areas to improve:" in contents[-1]["parts"][0]["text"]
+
+
+# --- question bank in the prompts ---
+
+from backend.questions import Question
+
+BANK_Q = Question("t-1", "Python basics", "easy", "What is a list?", ("mutable", "ordered"))
+
+
+def test_follow_up_prompt_contains_the_question_and_its_key_points():
+    system = build_messages("Python basics", "easy", [Message("assistant", "What is a list?"), Message("user", "A thing.")], BANK_Q)[0].text
+    assert "What is a list?" in system and "mutable; ordered" in system
+
+
+def test_follow_up_prompt_tells_the_model_not_to_reveal_the_key_points_and_to_ask_one_question():
+    system = build_messages("Python basics", "easy", [], BANK_Q)[0].text
+    assert "Never read them out" in system and "exactly ONE short follow-up" in system
+
+
+def test_question_stays_in_the_prompt_even_when_history_is_trimmed():
+    history = []
+    for i in range(20):
+        history += [Message("assistant", f"coach {i}"), Message("user", f"answer {i}")]
+    messages = build_messages("Python basics", "easy", history, BANK_Q)
+    assert "What is a list?" in messages[0].text  # the original question is long gone from the 12 kept messages
+    assert all("coach 0" != m.text for m in messages)
+
+
+def test_without_a_bank_question_the_generic_coach_prompt_is_used():
+    system = build_messages("Python basics", "easy", [])[0].text
+    assert "Ask ONE short question at a time" in system
+
+
+def test_summary_prompt_lists_the_questions_asked_and_their_key_points():
+    system = build_summary_messages("Python basics", "easy", [Message("assistant", "q"), Message("user", "a"), Message("assistant", "f")], [BANK_Q])[0].text
+    assert "1. What is a list?" in system and "mutable; ordered" in system
+    assert "do not credit points that were not said" in system
+
+
+def test_summary_prompt_without_questions_is_unchanged():
+    assert "key points" not in build_summary_messages("Python basics", "easy", [Message("assistant", "q")])[0].text

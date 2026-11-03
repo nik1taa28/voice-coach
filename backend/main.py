@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import time
 from pathlib import Path
 from typing import Callable
@@ -15,9 +16,11 @@ from backend.llm import LLMError, get_llm_provider
 from backend.logs import configure_logging, session_id_var
 from backend.metrics import Metrics
 from backend.prompts import build_messages, build_summary_messages
+from backend.questions import followups_per_question, load_bank, topics
 from backend.reliability import StageTimeout, Timeouts, TurnRunner, stream_with_retry, with_deadline
 from backend.sentences import SentenceSplitter
-from backend.session_state import InterviewSession, SessionError, State
+from backend.questions import DIFFICULTIES
+from backend.session_state import InterviewSession, SessionError, State, TurnPlan
 from backend.sessions import (
     UtteranceBuffer,
     build_coach_delta,
@@ -36,6 +39,10 @@ configure_logging()
 logger = logging.getLogger("voice_coach")
 app = FastAPI(title="Voice Coach")
 metrics = Metrics.from_env()  # one per process; looked up at call time, so tests can swap it with monkeypatch
+question_bank = load_bank()  # loaded once at startup: a bad bank file stops the server here, not in the middle of an interview
+followups = followups_per_question()  # LLM follow-ups per bank question (FOLLOWUPS_PER_QUESTION, default 2)
+question_rng = random.Random()  # tests swap it for a seeded one
+WRAPUP_TEXT = "That was the last question for this topic and level. Press End for your summary."
 
 
 INDEX_HTML = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
@@ -55,6 +62,11 @@ async def index() -> FileResponse:
 @app.get("/dashboard")
 async def dashboard() -> FileResponse:
     return FileResponse(DASHBOARD_HTML)
+
+
+@app.get("/topics")
+async def topics_endpoint() -> dict:
+    return {"topics": topics(question_bank), "difficulties": list(DIFFICULTIES)}
 
 
 @app.get("/metrics")
@@ -215,7 +227,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             try:
                 if kind == "start":
                     ensure_not_busy()
-                    session.start(message.get("topic"), message.get("difficulty"))
+                    session.start(message.get("topic"), message.get("difficulty"), topics(question_bank))
                     await send_state()
                     spawn("opening question", coach_turn(send, session, llm, tts, session_id, timeouts))
                 elif kind == "pause":
@@ -267,14 +279,30 @@ async def transcribe_timed(asr, session_id: str, pcm: bytes, sample_rate: int) -
     return build_transcript(session_id, transcript, audio_ms, asr_ms)
 
 
+def scripted_text(plan: TurnPlan) -> str | None:
+    """The exact line for a turn that needs no LLM, or None for a follow-up."""
+    if plan.kind == "bank":
+        return plan.question.question
+    if plan.kind == "wrapup":
+        return WRAPUP_TEXT
+    return None
+
+
 async def coach_turn(send: SafeSender, session: InterviewSession, llm, tts, session_id: str, timeouts: Timeouts) -> None:
     """Generate the coach's next line (state must be THINKING). Streams deltas; history is written only when complete.
+
+    The session first plans the turn (session.plan_turn). A bank question (or the wrap-up line) is scripted text: it is sent
+    as one delta and spoken, with no LLM call. A follow-up is written by the LLM and streamed. The plan is committed to the
+    session only by add_coach, so a failed or cancelled turn leaves the session unchanged.
 
     Each complete sentence is also sent to TTS and out as a `speak` message while the LLM keeps writing. TTS runs inline
     in the stream loop (no queue yet): a slow server-side TTS delays reading the next LLM piece, and llm_total_ms includes it.
     Failures: the LLM is retried once before its first piece (see stream_with_retry); TTS is never retried.
     """
-    messages = build_messages(session.topic, session.difficulty, session.history)
+    plan = session.plan_turn(question_bank, followups, question_rng)
+    scripted = scripted_text(plan)
+    provider_name = "bank" if scripted is not None else llm.name
+    messages = None if scripted is not None else build_messages(session.topic, session.difficulty, session.history, plan.question)
     splitter = SentenceSplitter()
     turn_started = time.perf_counter()
     next_seq = 0
@@ -310,34 +338,45 @@ async def coach_turn(send: SafeSender, session: InterviewSession, llm, tts, sess
         await send(build_coach_delta(session_id, piece))
         await speak_sentences(splitter.feed(piece))
 
-    try:
-        result = await stream_with_retry(lambda: llm.stream(messages), timeouts.llm_first_s, timeouts.llm_total_s, on_piece)
-        await speak_sentences(splitter.flush())  # the unterminated tail of the reply
-    except (LLMError, StageTimeout) as exc:
-        logger.exception("LLM failed")
-        session.fail_turn()  # client may hold partial deltas and queued speech; the error tells it to discard both
-        timed_out = isinstance(exc, StageTimeout)
-        metrics.count("turn_timeout" if timed_out else "turn_failed")
-        reason = "coach reply timed out" if timed_out else "coach reply failed"
-        await send(build_error(session_id, reason))
-        await send(build_state(session_id, session.state.value))
-        return
-    text = result.text.strip()  # what the client shows and what history stores must be identical
-    session.add_coach(text)
-    metrics.observe("llm_ttft", result.ttft_ms)
-    metrics.observe("llm_total", result.total_ms)
+    result = None
+    if scripted is not None:
+        await on_piece(scripted)  # TTS failures are handled inside speak_sentences; nothing here can raise LLMError or StageTimeout
+        await speak_sentences(splitter.flush())
+        text = scripted
+    else:
+        try:
+            result = await stream_with_retry(lambda: llm.stream(messages), timeouts.llm_first_s, timeouts.llm_total_s, on_piece)
+            await speak_sentences(splitter.flush())  # the unterminated tail of the reply
+        except (LLMError, StageTimeout) as exc:
+            logger.exception("LLM failed")
+            session.fail_turn()  # client may hold partial deltas and queued speech; the error tells it to discard both
+            timed_out = isinstance(exc, StageTimeout)
+            metrics.count("turn_timeout" if timed_out else "turn_failed")
+            reason = "coach reply timed out" if timed_out else "coach reply failed"
+            await send(build_error(session_id, reason))
+            await send(build_state(session_id, session.state.value))
+            return
+        text = result.text.strip()  # what the client shows and what history stores must be identical
+    session.add_coach(text, plan)
+    if result is not None:  # a bank line has no LLM timings; recording zeros would be inventing numbers
+        metrics.observe("llm_ttft", result.ttft_ms)
+        metrics.observe("llm_total", result.total_ms)
     if first_sentence_ms is not None:
         metrics.observe("first_sentence", first_sentence_ms)
     if first_speak_ms is not None:
         metrics.observe("first_speak", first_speak_ms)
     metrics.count("turn_ok")
     logger.info("coach turn done", extra={"fields": {
-        "llm": llm.name, "tts": tts.name, "attempts": result.attempts,
-        "ttft_ms": round(result.ttft_ms), "total_ms": round(result.total_ms),
+        "llm": provider_name, "tts": tts.name, "plan": plan.kind, "attempts": None if result is None else result.attempts,
+        "ttft_ms": None if result is None else round(result.ttft_ms), "total_ms": None if result is None else round(result.total_ms),
         "first_sentence_ms": None if first_sentence_ms is None else round(first_sentence_ms),
         "first_speak_ms": None if first_speak_ms is None else round(first_speak_ms),
     }})
-    await send(build_coach_done(session_id, text, llm.name, result.ttft_ms, result.total_ms, tts.name, first_sentence_ms, first_speak_ms))
+    await send(build_coach_done(
+        session_id, text, provider_name,
+        None if result is None else result.ttft_ms, None if result is None else result.total_ms,
+        tts.name, first_sentence_ms, first_speak_ms,
+    ))
     await send(build_state(session_id, session.state.value))
 
 
@@ -348,7 +387,7 @@ async def send_summary(send: SafeSender, session: InterviewSession, llm, session
         await send(build_summary(session_id, "No answers were recorded, so there is nothing to summarise.", "none", None, None))
         return
     try:
-        result = await stream_with_retry(lambda: llm.stream(build_summary_messages(session.topic, session.difficulty, history)), timeouts.llm_first_s, timeouts.summary_s)
+        result = await stream_with_retry(lambda: llm.stream(build_summary_messages(session.topic, session.difficulty, history, session.asked_questions)), timeouts.llm_first_s, timeouts.summary_s)
     except (LLMError, StageTimeout) as exc:
         logger.exception("summary failed")
         await send(build_error(session_id, "summary timed out" if isinstance(exc, StageTimeout) else "summary failed"))

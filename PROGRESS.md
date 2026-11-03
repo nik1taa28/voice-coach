@@ -13,13 +13,14 @@
 | M4 reliability | Done, committed (`74ce23c`), tests pass; verified by hand on real uvicorn (fake providers) |
 | M5 observability | Done, committed (`6e1787a`, branch `m5-observability`). Metrics, `/metrics`, JSON logs with session ids, dashboard, Locust load test, baseline report, learning notes |
 | M6 Docker / CI / README numbers | **Written, partly verified.** README updated with measured numbers; CI recipe verified in a clean venv (186 passed); demo mode verified from a clean venv. **Dockerfile not built** (no Docker daemon) and **CI not run on GitHub** |
-| Curated question bank | Planned, after M6 (your decision). Not built |
+| Curated question bank | **Built, uncommitted.** 65 questions, 7 topics (OS split into 3). Bank question spoken with no LLM call, then 2 LLM follow-ups (`FOLLOWUPS_PER_QUESTION`), `GET /topics`, topic dropdown, key points in the prompts. Tests and a demo-mode server run only; **real Gemini run pending** |
 
-**Tests:** `193 passed in 3.50s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-02. 148 are M0-M4; 38 are M5; 7 are new summary-prompt tests.
+**Tests:** `236 passed in 3.63s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-03. About 25 older WebSocket tests were rewritten because the opener is now a bank question.
 
 **Failed / open:** the Locust 100-user hang is fixed (see below). **Found in your real runs: the end summary was wrong** (Gemini asked another question instead of summarising). Fixed in `backend/prompts.py` (final user turn; four parts: Summary, Strengths, Areas to improve, Practice next; topic and difficulty now passed in) and tested with the fake only; **press End in a real Gemini run to confirm**.
 
 **Needs you:**
+0. **Review `backend/question_bank.json`** (65 questions I wrote; difficulty labels are my judgement) and **run the real pipeline once**: `source .env`, start, answer 2-3 times, End. Check the summary has the four parts, mentions topic/level, a concrete *Practice next*, no question; and that follow-ups do not read the key points out. Gemini free tier was 20 requests/day on `gemini-2.5-flash` (429 seen on 2026-11-02); bank turns now save calls.
 1. **Build and run the Docker image** (commands in `docs/PROJECT_BRIEF.md` section 7, step I). Start Docker Desktop first.
 2. **Push a branch to GitHub** to get the first real CI run (I did not push anything).
 3. **Your own tests:** real microphone, real Whisper + Gemini end to end, other browsers (commands in `docs/PROJECT_BRIEF.md` section 7).

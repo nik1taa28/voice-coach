@@ -123,7 +123,7 @@ def test_two_connections_never_mix_session_ids():
             ids = []
             for ws in (a, b):
                 ids.append(ws.receive_json()["session_id"])
-                ws.send_json({"type": "start", "topic": "Python", "difficulty": "easy"})
+                ws.send_json({"type": "start", "topic": "Python basics", "difficulty": "easy"})
             for ws in (a, b):
                 while ws.receive_json()["type"] != "coach_done":
                     pass

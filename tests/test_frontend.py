@@ -23,3 +23,14 @@ def test_index_handles_speech_messages():
     html = client.get("/").text
     for token in ("msg.type === 'speak'", "speechSynthesis", "playback_started", "cancelSpeech"):
         assert token in html
+
+
+def test_topic_is_a_dropdown_filled_from_the_server():
+    html = client.get("/").text
+    assert '<select id="topic"' in html and "fetch('/topics')" in html
+
+
+def test_a_bank_line_does_not_clear_the_fake_llm_warning():
+    # A bank question makes no LLM call, so it must not count as "the LLM is real". Same rule as for provider 'none'.
+    html = client.get("/").text
+    assert "provider === 'none' || provider === 'bank'" in html

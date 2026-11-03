@@ -53,8 +53,8 @@ def build_coach_done(
     session_id: str,
     text: str,
     provider: str,
-    ttft_ms: float,
-    total_ms: float,
+    ttft_ms: float | None,
+    total_ms: float | None,
     tts_provider: str | None = None,
     first_sentence_ms: float | None = None,
     first_speak_ms: float | None = None,
@@ -64,8 +64,8 @@ def build_coach_done(
         "session_id": session_id,
         "text": text,
         "provider": provider,
-        "llm_ttft_ms": round(ttft_ms, 1),  # time to first token
-        "llm_total_ms": round(total_ms, 1),  # time to last token (includes forwarding deltas AND inline TTS to the client)
+        "llm_ttft_ms": _round_or_none(ttft_ms),  # time to first token; None when the line came from the question bank (no LLM call)
+        "llm_total_ms": _round_or_none(total_ms),  # time to last token (includes forwarding deltas AND inline TTS to the client)
         "tts_provider": tts_provider,
         "first_sentence_ms": _round_or_none(first_sentence_ms),  # turn start -> first complete sentence
         "first_speak_ms": _round_or_none(first_speak_ms),  # turn start -> first speak message sent (None if nothing spoken)

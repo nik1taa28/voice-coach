@@ -1,5 +1,6 @@
 """M4 reliability over the real /ws route: cancellation, deadlines, retry, cleanup. Slow/failing fakes, tiny timeouts."""
 import asyncio
+import random
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +9,7 @@ from backend.asr import FakeASR
 from backend.audio import SAMPLE_RATE
 from backend.llm import FakeLLM
 from backend.main import app
+from backend.questions import Question
 from backend.tts import FakeTTS
 
 client = TestClient(app)
@@ -42,6 +44,14 @@ class ExplodingLLM(FakeLLM):
         yield  # pragma: no cover
 
 
+@pytest.fixture(autouse=True)
+def one_question_bank(monkeypatch):
+    """The opener is a bank question and never calls the LLM. Every LLM call in these tests is a follow-up to an answer."""
+    monkeypatch.setattr("backend.main.question_bank", [Question("t-1", "Python basics", "easy", "What is a list?", ("mutable",))])
+    monkeypatch.setattr("backend.main.followups", 2)
+    monkeypatch.setattr("backend.main.question_rng", random.Random(0))
+
+
 @pytest.fixture
 def wire(monkeypatch):
     def install(llm=None, asr=None, tts=None):
@@ -70,7 +80,7 @@ def wait_for_deltas(ws, count):
 
 def start_interview(ws):
     ws.receive_json()  # session
-    ws.send_json({"type": "start", "topic": "Python", "difficulty": "easy"})
+    ws.send_json({"type": "start", "topic": "Python basics", "difficulty": "easy"})
     return read_until(ws, "state", state="listening")
 
 
@@ -80,6 +90,12 @@ def send_answer(ws):
     ws.send_json({"type": "utterance_end"})
 
 
+def answer_and_wait(ws):
+    """Send an answer and read until the turn is over (the session is listening again)."""
+    send_answer(ws)
+    return read_until(ws, "state", state="listening")
+
+
 def reasons(messages):
     return [m["reason"] for m in messages if m["type"] == "error"]
 
@@ -87,7 +103,7 @@ def reasons(messages):
 # --- cancellation: the receive loop keeps reading during a turn -----------------------------------------------------
 
 def test_pause_during_reply_cancels_it_and_leaves_no_half_exchange(wire):
-    llm = ScriptLLM("ok", "hang", "ok")
+    llm = ScriptLLM("hang", "ok")  # the opener is a bank question, so the first LLM call is the first answer's follow-up
     wire(llm)
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
@@ -100,13 +116,13 @@ def test_pause_during_reply_cancels_it_and_leaves_no_half_exchange(wire):
         read_until(ws, "state", state="listening")
         send_answer(ws)
         read_until(ws, "coach_done")
-    roles = [m.role for m in llm.prompts[2]]
+    roles = [m.role for m in llm.prompts[1]]
     assert roles == ["system", "user", "assistant", "user"]  # the interrupted answer was dropped, not left dangling
-    assert llm.closed == 3  # all three streams were released, including the cancelled one
+    assert llm.closed == 2  # both streams were released, including the cancelled one
 
 
 def test_end_during_reply_cancels_it_then_summarises_what_was_complete(wire):
-    wire(ScriptLLM("ok", "hang"))
+    wire(ScriptLLM("hang"))
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
         send_answer(ws)
@@ -129,10 +145,10 @@ def test_pause_during_asr_cancels_it(wire):
 
 
 def test_pause_during_opener_returns_to_idle_and_reports_it(wire):
-    wire(FakeLLM(hang=True))
+    wire(tts=FakeTTS(hang_on_seq=0))  # the bank opener cannot hang in the LLM, but its speech can
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
-        ws.send_json({"type": "start", "topic": "Python", "difficulty": "easy"})
+        ws.send_json({"type": "start", "topic": "Python basics", "difficulty": "easy"})
         read_until(ws, "state", state="thinking")
         ws.send_json({"type": "pause"})
         msgs = read_until(ws, "error", reason="cannot pause while idle")
@@ -170,8 +186,8 @@ def test_disconnect_mid_reply_releases_the_llm_stream(wire):
     llm = ScriptLLM("hang")
     wire(llm)
     with client.websocket_connect("/ws") as ws:
-        ws.receive_json()
-        ws.send_json({"type": "start", "topic": "Python", "difficulty": "easy"})
+        start_interview(ws)
+        send_answer(ws)
         wait_for_deltas(ws, 2)
     # leaving the block disconnects; the server's finally must cancel the turn, which closes the stream
     assert llm.closed == 1
@@ -179,14 +195,13 @@ def test_disconnect_mid_reply_releases_the_llm_stream(wire):
 
 # --- deadlines and retry --------------------------------------------------------------------------------------------
 
-def test_hung_llm_times_out_after_one_retry_and_opener_returns_to_idle(wire, monkeypatch):
+def test_hung_llm_times_out_after_one_retry_and_the_answer_rolls_back(wire, monkeypatch):
     monkeypatch.setenv("TIMEOUT_LLM_FIRST_S", "0.05")
     llm = FakeLLM(hang=True)
     wire(llm)
     with client.websocket_connect("/ws") as ws:
-        ws.receive_json()
-        ws.send_json({"type": "start", "topic": "Python", "difficulty": "easy"})
-        msgs = read_until(ws, "state", state="idle")
+        start_interview(ws)
+        msgs = answer_and_wait(ws)
         assert reasons(msgs) == ["coach reply timed out"]
     assert llm.stream_starts == 2  # first try + exactly one retry
 
@@ -195,7 +210,8 @@ def test_flaky_llm_is_retried_invisibly(wire):
     llm = FakeLLM(fail_first_n=1)
     wire(llm)
     with client.websocket_connect("/ws") as ws:
-        msgs = start_interview(ws)
+        start_interview(ws)
+        msgs = answer_and_wait(ws)
         assert reasons(msgs) == []  # the client never saw the failed first attempt
         assert any(m["type"] == "coach_done" for m in msgs)
     assert llm.stream_starts == 2
@@ -205,9 +221,8 @@ def test_failure_after_first_piece_is_not_retried(wire):
     llm = FakeLLM(fail_after_pieces=2)
     wire(llm)
     with client.websocket_connect("/ws") as ws:
-        ws.receive_json()
-        ws.send_json({"type": "start", "topic": "Python", "difficulty": "easy"})
-        msgs = read_until(ws, "state", state="idle")
+        start_interview(ws)
+        msgs = answer_and_wait(ws)
         assert reasons(msgs) == ["coach reply failed"]
     assert llm.stream_starts == 1  # a retry would have sent the first words twice
 
@@ -250,9 +265,8 @@ def test_summary_hang_times_out_but_session_still_ends(wire, monkeypatch):
 def test_unexpected_error_in_a_turn_is_reported_not_swallowed(wire):
     wire(ExplodingLLM())
     with client.websocket_connect("/ws") as ws:
-        ws.receive_json()
-        ws.send_json({"type": "start", "topic": "Python", "difficulty": "easy"})
-        msgs = read_until(ws, "state", state="idle")
+        start_interview(ws)
+        msgs = answer_and_wait(ws)
         assert reasons(msgs) == ["internal error"]
         ws.send_json({"type": "ping"})  # the connection survived
         assert ws.receive_json()["type"] == "echo"

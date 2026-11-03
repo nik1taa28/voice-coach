@@ -1,14 +1,25 @@
 """Interview session state machine. Pure: no FastAPI, no I/O, so every transition is unit testable."""
+import random
+from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 from backend.llm.base import Message
+from backend.questions import DIFFICULTIES, Question, pick_question
 
 MAX_TOPIC_CHARS = 80
-DIFFICULTIES = ("easy", "medium", "hard")
 
 
 class SessionError(ValueError):
     """An illegal event for the current state, or invalid input. The message is safe to show the client."""
+
+
+@dataclass(frozen=True)
+class TurnPlan:
+    """What the coach does next. Decided before the turn runs, applied to the session only if the turn succeeds."""
+
+    kind: Literal["bank", "followup", "wrapup"]  # bank: say the next bank question; followup: LLM probes the current one; wrapup: bank exhausted
+    question: Question | None  # the bank question (new for "bank", current for "followup", None for "wrapup")
 
 
 class State(str, Enum):
@@ -27,10 +38,17 @@ class InterviewSession:
         self.topic = ""
         self.difficulty = ""
         self._history: list[Message] = []
+        self.current: Question | None = None  # the bank question being discussed
+        self.followups_used = 0  # LLM follow-ups already asked about `current`
+        self._asked: list[Question] = []  # bank questions asked so far, in order
 
     @property
     def history(self) -> list[Message]:
         return list(self._history)  # copy, so callers cannot bypass the state checks
+
+    @property
+    def asked_questions(self) -> list[Question]:
+        return list(self._asked)
 
     def _require(self, *allowed: State, event: str) -> None:
         if self.state not in allowed:
@@ -40,18 +58,32 @@ class InterviewSession:
         """Recording is allowed while listening, and while idle (M1 transcribe-only mode: no LLM is called)."""
         self._require(State.IDLE, State.LISTENING, event="record")
 
-    def start(self, topic: object, difficulty: object) -> None:
-        """idle -> thinking (the opening question is being generated)."""
+    def start(self, topic: object, difficulty: object, known_topics: list[str] | None = None) -> None:
+        """idle -> thinking (the opening question is being prepared). With known_topics, the topic must be one of them."""
         self._require(State.IDLE, event="start")
         if not isinstance(topic, str) or not topic.strip():
             raise SessionError("topic must be a non-empty string")
         if len(topic.strip()) > MAX_TOPIC_CHARS:
             raise SessionError(f"topic longer than {MAX_TOPIC_CHARS} characters")
+        if known_topics is not None and topic.strip() not in known_topics:
+            raise SessionError("unknown topic: pick one from the list")
         if difficulty not in DIFFICULTIES:
             raise SessionError(f"difficulty must be one of {', '.join(DIFFICULTIES)}")
         self.topic = topic.strip()
         self.difficulty = difficulty
+        self.current = None
+        self.followups_used = 0
+        self._asked = []
         self.state = State.THINKING
+
+    def plan_turn(self, bank: list[Question], followups_per_question: int, rng: random.Random | None = None) -> TurnPlan:
+        """Decide the coach's next move. Pure: it changes nothing, so a turn that fails or is cancelled leaves the session as it was."""
+        if self.current is not None and self.followups_used < followups_per_question:
+            return TurnPlan("followup", self.current)
+        question = pick_question(bank, self.topic, self.difficulty, {q.id for q in self._asked}, rng)
+        if question is None:
+            return TurnPlan("wrapup", None)
+        return TurnPlan("bank", question)
 
     def add_user(self, text: str) -> None:
         """listening -> thinking."""
@@ -61,11 +93,20 @@ class InterviewSession:
         self._history.append(Message("user", text.strip()))
         self.state = State.THINKING
 
-    def add_coach(self, text: str) -> None:
-        """thinking -> listening. Called only with the COMPLETE reply, so history never holds a partial one."""
+    def add_coach(self, text: str, plan: TurnPlan | None = None) -> None:
+        """thinking -> listening. Called only with the COMPLETE reply, so history never holds a partial one.
+        The plan is applied here and nowhere else: this is the commit point."""
         self._require(State.THINKING, event="record a coach reply")
         self._history.append(Message("assistant", text.strip()))
         self.state = State.LISTENING
+        if plan is None:
+            return
+        if plan.kind == "bank" and plan.question is not None:
+            self.current = plan.question
+            self.followups_used = 0
+            self._asked.append(plan.question)
+        elif plan.kind == "followup":
+            self.followups_used += 1
 
     def fail_turn(self) -> None:
         """thinking -> listening (or idle if the opener failed). Drops the unanswered user message so roles still alternate."""

@@ -477,3 +477,50 @@ flowchart LR
 - **Common mistake (extra):** fixing a fake-friendly code path and calling the feature done. Anything the fake cannot imitate (message order, empty replies, rate limits) needs its own test or a real run.
 - Real-LLM timings and what is still pending are in `docs/architecture.md` (rows dated 2026-11-02).
 - The summary prompt now also receives the topic and difficulty (judge answers against the level) and ends with a one-line **Practice next**. Measured stats (speaking time, words per answer, filler words) were left for the delivery-feedback stretch goal: speaking time is not stored per answer yet, and Whisper may drop "um/uh", so filler counts could read too low (not measured). Key-point coverage waits for the question bank.
+
+## Question bank: the bank asks, the LLM follows up (2026-11-03)
+
+```mermaid
+flowchart TD
+  P["session.plan_turn()<br/>pure: decides, changes nothing"] --> K{plan}
+  K -- bank --> B["say the bank question word for word<br/>no LLM call"]
+  K -- followup --> L["LLM sees question + key points + history<br/>writes reaction + ONE follow-up"]
+  K -- wrapup --> W["'last question for this topic and level,<br/>press End'"]
+  B --> C
+  L --> C
+  W --> C
+  C["turn completed?"] -- yes --> M["session.add_coach(text, plan)<br/>the ONLY place the plan is applied"]
+  C -- failed / cancelled --> R["session unchanged,<br/>user answers again"]
+```
+
+- **Problem:** the LLM invented the questions, so they were unreliable and could not be defended, and the first turn spent one of 20 free Gemini requests per day.
+- **Now:** questions come from `backend/question_bank.json` (topic, difficulty, key points). A bank question is spoken as written, with no LLM call. The LLM only writes follow-ups (2 per question) and the end summary. It gets the question and its key points in the system prompt, so it can probe what was missed.
+- **Where the key points live:** in the system prompt, not the history, because the history window keeps only the last 12 messages and the original question would be trimmed out of a long conversation.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Who writes the main questions | curated JSON bank | LLM invents them | I can defend every question; costs me writing and reviewing the content, and the bank is finite |
+| Follow-ups per question | 2, env `FOLLOWUPS_PER_QUESTION` (0-5) | 1, or LLM decides | closer to a real interview; fewer topics per session. A setting, so it can change without code |
+| When session state changes | plan first, commit in `add_coach` | mutate while planning | a failed or cancelled turn needs no undo code. The existing rollback only pops the user message, so mutating early would leave a question marked asked that was never said |
+| Bank loading | once at startup, fail fast | read per request | a bad file stops the server immediately, not mid-interview |
+| Topics | must come from the bank, dropdown from `GET /topics` | free text | the UI can only offer topics that have questions; the old free-text topics are gone |
+| Bank turn timing | `null`, no metric sample | record 0 ms | a 0 would pull the LLM percentiles down and be an invented number |
+| Provider label for a bank line | `"bank"`, ignored by the FAKE banner logic | reuse `"fake"` / `"none"` | a bank line says nothing about whether the LLM is real; treating it as "not fake" would hide the FAKE warning |
+
+### Verified so far
+- 236 tests pass (run 2026-11-03). One real uvicorn server run in demo mode: turns went bank, fake follow-up, fake follow-up, bank, fake follow-up, then the summary.
+- **Pending:** a run with real Gemini (does it avoid reading the key points out, stay on the question, ask exactly one follow-up?) and the dropdown seen in a browser.
+
+**Key concept:** separate deciding from doing. `plan_turn` is a pure function of the session; `add_coach` is the single commit point. Pure planning is easy to unit test, and cancellation safety comes from the structure instead of extra cleanup code.
+
+**Interview question:** Why does your coach speak the bank question itself instead of asking the LLM to ask it?
+*Short answer:* The questions are curated, so the LLM must not reword or replace them. Speaking the stored text keeps them defensible and testable, makes that turn free and instant (no LLM call, no quota), and leaves the LLM the part it is good at: reacting to what the candidate actually said.
+
+**Exercise:** set `FOLLOWUPS_PER_QUESTION=0` and run a demo-mode session. Predict the sequence of coach turns before you run it, then check the `plan` field in the logs.
+
+**Common mistake:** changing session state while deciding what to do next. When the turn then fails, the state says a question was asked that the candidate never heard, and the retry skips it.
+
+**Observed while building:**
+- Changing the opener broke about 25 tests, and several of them *hung* instead of failing: they waited for an error that could no longer happen because the opener no longer calls the LLM. A test that waits forever is worse than one that fails. Run suspect test files with a time limit (`perl -e 'alarm 30; exec @ARGV' ...`) to find the hanging one.
+- The FAKE-LLM warning in the page is driven by the provider name of each message. A new name (`bank`) would have cleared the warning by accident, so a test now pins that a bank line does not count as "the LLM is real".

@@ -16,7 +16,7 @@
   #transcript li.coach { border-color: #1d4ed8; }
   #transcript li.you { border-color: #15803d; }
   #setup, #controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .5rem 0; }
-  #topic { font-size: 1rem; padding: .4rem; flex: 1 1 12rem; }
+  #topic { font-size: 1rem; padding: .4rem; flex: 1 1 12rem; max-width: 100%; }
   select { font-size: 1rem; padding: .4rem; }
   #summary { border: 1px solid #999; padding: .5rem .75rem; margin-top: 1rem; white-space: pre-wrap; }
   #summary:empty { display: none; }
@@ -24,9 +24,9 @@
 </head>
 <body>
 <h1>Voice Coach</h1>
-<p>M3: pick a topic, start, answer by voice, and the coach replies with a follow-up and speaks it.</p>
+<p>Pick a topic and level, start, and answer by voice. The coach asks a question from the question bank, then asks follow-ups about your answers.</p>
 <div id="setup">
-  <input id="topic" value="Python basics" maxlength="80" aria-label="Topic">
+  <select id="topic" aria-label="Topic" disabled><option>loading topics…</option></select>
   <select id="difficulty" aria-label="Difficulty">
     <option>easy</option><option selected>medium</option><option>hard</option>
   </select>
@@ -74,6 +74,7 @@ const startBtn = $('start'), pauseBtn = $('pause'), resumeBtn = $('resume'), end
 
 let ws, ctx, stream, node, recording = false, stopPressedAt = 0;
 let state = 'idle', connected = false, busy = false; // busy: stop pressed, server has not answered yet
+let topicsLoaded = false; // the topic list comes from GET /topics; Start stays off until it arrived
 let coachLine = null; // the <li> being filled by coach_delta messages
 let ratio = 1, carry = new Float32Array(0);
 
@@ -87,7 +88,7 @@ function addLine(text, cls) {
 
 // Buttons follow the SERVER's state, so the page cannot drift from the real session.
 function refresh() {
-  startBtn.disabled = !(connected && state === 'idle');
+  startBtn.disabled = !(connected && topicsLoaded && state === 'idle');
   toggle.disabled = !(connected && state === 'listening' && (recording || !busy));
   // M4: the server cancels a running turn on Pause / End, so both stay available while it is thinking or processing audio.
   pauseBtn.disabled = !(connected && (state === 'listening' || state === 'thinking') && !recording);
@@ -104,7 +105,7 @@ const FAKE_TEXT = {
 };
 function renderWarn() { warnEl.textContent = [...warnings.values()].join(' '); }
 function showProvider(kind, provider) {
-  if (provider === 'none') return; // no LLM call happened (empty summary): says nothing about the provider
+  if (provider === 'none' || provider === 'bank') return; // no LLM call happened (empty summary, or a question-bank line): says nothing about the provider
   if (provider === 'fake') warnings.set(kind, FAKE_TEXT[kind]); else warnings.delete(kind);
   renderWarn();
 }
@@ -183,6 +184,28 @@ function downsample(chunk) {
   return out;
 }
 
+// Topics come from the server's question bank, so the page can only offer topics that have questions.
+async function loadTopics() {
+  try {
+    const response = await fetch('/topics');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const topicSelect = $('topic');
+    topicSelect.textContent = '';
+    for (const name of data.topics) {
+      const option = document.createElement('option');
+      option.textContent = name; // textContent: the value is the same string
+      topicSelect.appendChild(option);
+    }
+    topicSelect.disabled = false;
+    topicsLoaded = data.topics.length > 0;
+    if (!topicsLoaded) statusEl.textContent = 'the question bank has no topics';
+  } catch (err) {
+    statusEl.textContent = `could not load topics (${err.message}) - reload the page`;
+  }
+  refresh();
+}
+
 function connect() {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${scheme}://${location.host}/ws`);
@@ -215,7 +238,8 @@ function connect() {
       if (!coachLine) coachLine = addLine('', 'coach');
       coachLine.textContent = `Coach: ${msg.text}`;
       coachLine = null;
-      timingEl.textContent += ` | llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms | llm provider ${msg.provider}` +
+      const llmTiming = msg.llm_ttft_ms === null ? 'from the question bank, no LLM call' : `llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms`;
+      timingEl.textContent += ` | ${llmTiming} | provider ${msg.provider}` +
         ` | tts ${msg.tts_provider}: first sentence ${msg.first_sentence_ms} ms, first speak sent ${msg.first_speak_ms} ms (server, from turn start)`;
       showProvider('llm', msg.provider);
     } else if (msg.type === 'summary') {
@@ -284,6 +308,7 @@ startBtn.onclick = () => {
 pauseBtn.onclick = () => ws.send(JSON.stringify({ type: 'pause' }));
 resumeBtn.onclick = () => ws.send(JSON.stringify({ type: 'resume' }));
 endBtn.onclick = () => ws.send(JSON.stringify({ type: 'end' }));
+loadTopics();
 connect();
 </script>
 </body>

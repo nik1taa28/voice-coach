@@ -9,6 +9,8 @@ A spoken mock-interview coach: the coach asks a question out loud, I answer by m
 it, an LLM replies with a short follow-up, the app speaks it. Simple prompt + conversation history only.
 Controls: start/pause/end, topic + difficulty, visible transcript, short end summary. Demo mode with fake
 providers must work with no credentials. No RAG, no vector DBs, no agent frameworks, not a general assistant.
+Questions come from a curated JSON question bank (topic, difficulty, key points), not invented by the LLM. The LLM only writes follow-ups and feedback.
+Stretch (after M4): delivery feedback from measurable signals only (words per minute, filler words, pauses, answer length); no emotion-detection ML.
 
 ## Constraints
 - FREE ONLY. No paid services. I may have a free Gemini API key; never hardcode keys (.env.example + .gitignore).
