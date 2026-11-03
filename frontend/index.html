@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Coach</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  button { font-size: 1rem; padding: .5rem 1rem; }
+  #status { color: #555; margin: .75rem 0; }
+  #warn { color: #b45309; font-weight: 600; min-height: 1.2em; }
+  #timing { font-family: ui-monospace, monospace; font-size: .85rem; color: #333; min-height: 1.2em; }
+  #transcript { list-style: none; padding: 0; }
+  #transcript li { border-left: 3px solid #999; padding: .25rem .75rem; margin: .5rem 0; }
+  #transcript li.error { border-color: #b91c1c; color: #b91c1c; }
+  #transcript li.coach { border-color: #1d4ed8; }
+  #transcript li.you { border-color: #15803d; }
+  #setup, #controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .5rem 0; }
+  #topic { font-size: 1rem; padding: .4rem; flex: 1 1 12rem; max-width: 100%; }
+  select { font-size: 1rem; padding: .4rem; }
+  #summary { border: 1px solid #999; padding: .5rem .75rem; margin-top: 1rem; white-space: pre-wrap; }
+  #summary:empty { display: none; }
+</style>
+</head>
+<body>
+<h1>Voice Coach</h1>
+<p>Pick a topic, level and number of questions, start, and answer by voice. The coach asks questions from the question bank and may follow up on your answers. The interview ends by itself after the chosen number of questions or at the time limit (15 minutes by default), or when you press End.</p>
+<div id="setup">
+  <select id="topic" aria-label="Topic" disabled><option>loading topics…</option></select>
+  <select id="difficulty" aria-label="Difficulty">
+    <option>easy</option><option selected>medium</option><option>hard</option>
+  </select>
+  <select id="count" aria-label="Number of questions">
+    <option value="5">5 questions</option><option value="6" selected>6 questions</option>
+    <option value="8">8 questions</option><option value="10">10 questions</option>
+  </select>
+  <button id="start" disabled>Start interview</button>
+</div>
+<div id="controls">
+  <button id="toggle" disabled>Start recording</button>
+  <button id="pause" disabled>Pause</button>
+  <button id="resume" disabled>Resume</button>
+  <button id="end" disabled>End &amp; summarise</button>
+</div>
+<div id="status">connecting…</div>
+<div id="warn"></div>
+<div id="timing"></div>
+<ul id="transcript"></ul>
+<div id="summary"></div>
+
+<script>
+const TARGET_RATE = 16000;
+const BATCH_SAMPLES = 2048; // worklet posts this many samples at a time
+
+// The worklet runs on the audio thread. It only batches samples and hands them to the main thread.
+const workletSource = `
+class Batcher extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(${BATCH_SAMPLES}); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.buf[this.n++] = ch[i];
+      if (this.n === this.buf.length) {
+        this.port.postMessage(this.buf.slice(0));
+        this.n = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('batcher', Batcher);
+`;
+
+const $ = (id) => document.getElementById(id);
+const toggle = $('toggle'), statusEl = $('status'), warnEl = $('warn'), timingEl = $('timing'), list = $('transcript');
+const startBtn = $('start'), pauseBtn = $('pause'), resumeBtn = $('resume'), endBtn = $('end'), summaryEl = $('summary');
+
+let ws, ctx, stream, node, recording = false, stopPressedAt = 0;
+let state = 'idle', connected = false, busy = false; // busy: stop pressed, server has not answered yet
+let topicsLoaded = false; // the topic list comes from GET /topics; Start stays off until it arrived
+let coachLine = null; // the <li> being filled by coach_delta messages
+let ratio = 1, carry = new Float32Array(0);
+
+function addLine(text, cls) {
+  const li = document.createElement('li');
+  li.textContent = text; // textContent, never innerHTML: server text is untrusted
+  if (cls) li.className = cls;
+  list.appendChild(li);
+  return li;
+}
+
+// Buttons follow the SERVER's state, so the page cannot drift from the real session.
+function refresh() {
+  startBtn.disabled = !(connected && topicsLoaded && state === 'idle');
+  toggle.disabled = !(connected && state === 'listening' && (recording || !busy));
+  // M4: the server cancels a running turn on Pause / End, so both stay available while it is thinking or processing audio.
+  pauseBtn.disabled = !(connected && (state === 'listening' || state === 'thinking') && !recording);
+  resumeBtn.disabled = !(connected && state === 'paused');
+  endBtn.disabled = !(connected && (state === 'listening' || state === 'paused' || state === 'thinking') && !recording);
+}
+
+// One warning per stage, so a fake ASR and a real LLM (or the other way round) are each labelled correctly.
+const warnings = new Map();
+const FAKE_TEXT = {
+  asr: 'FAKE speech recognition: placeholder text, not your words.',
+  llm: 'FAKE coach: placeholder text, not real coaching.',
+  tts: 'FAKE voice: a beep, not speech.',
+};
+const END_REASON_TEXT = {
+  question_limit: 'all your questions were asked',
+  time_limit: 'the time limit was reached',
+  bank_exhausted: 'no more questions on this topic, at any level',
+  manual: 'you pressed End',
+};
+function renderWarn() { warnEl.textContent = [...warnings.values()].join(' '); }
+function showProvider(kind, provider) {
+  // No usable LLM reply (empty summary, a question-bank line, or the canned fallback): says nothing about the provider
+  if (provider === 'none' || provider === 'bank' || provider === 'fallback') return;
+  if (provider === 'fake') warnings.set(kind, FAKE_TEXT[kind]); else warnings.delete(kind);
+  renderWarn();
+}
+
+// Speech: sentences arrive as `speak` messages and play strictly in order. Server audio (fake TTS) plays through <audio>;
+// provider 'browser' means the text is spoken here by speechSynthesis. `speechGen` invalidates callbacks of cancelled items.
+let speechQueue = [], speaking = false, speechGen = 0, awaitingFirstAudio = false;
+let currentAudio = null, currentUtterance = null; // Chrome can garbage-collect an utterance before it ends: keep a reference
+
+function enqueueSpeech(msg) {
+  if (!msg.audio_b64 && !('speechSynthesis' in window)) {
+    warnings.set('voice', 'This browser has no speech synthesis: text only.');
+    renderWarn();
+    return;
+  }
+  speechQueue.push(msg);
+  if (!speaking) playNext();
+}
+
+function markAudible() { // the first sound after a stop press: report the browser-clock latency once
+  if (!awaitingFirstAudio) return;
+  awaitingFirstAudio = false;
+  const ms = Math.round(performance.now() - stopPressedAt);
+  timingEl.textContent += ` | stop->audio ${ms} ms (browser clock)`;
+  ws.send(JSON.stringify({ type: 'playback_started', stop_to_audio_ms: ms }));
+}
+
+function playNext() {
+  const msg = speechQueue.shift();
+  if (!msg) { speaking = false; return; }
+  speaking = true;
+  const gen = speechGen;
+  const next = () => { if (gen === speechGen) playNext(); };
+  if (msg.audio_b64) {
+    currentAudio = new Audio(`data:${msg.mime};base64,${msg.audio_b64}`);
+    currentAudio.onplaying = () => { if (gen === speechGen) markAudible(); };
+    currentAudio.onended = next;
+    currentAudio.onerror = next;
+    currentAudio.play().catch((err) => { addLine(`audio blocked: ${err.name}`, 'error'); next(); });
+  } else {
+    currentUtterance = new SpeechSynthesisUtterance(msg.text);
+    currentUtterance.lang = 'en-US';
+    currentUtterance.onstart = () => { if (gen === speechGen) markAudible(); };
+    currentUtterance.onend = next;
+    currentUtterance.onerror = next;
+    speechSynthesis.speak(currentUtterance);
+  }
+}
+
+function cancelSpeech() {
+  speechGen++; // callbacks from the item being cancelled must not advance the queue
+  speechQueue = [];
+  speaking = false;
+  awaitingFirstAudio = false;
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  currentUtterance = null;
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+}
+
+// Box-average downsample from the mic's native rate to 16 kHz, then Float32 [-1,1] -> Int16.
+// `carry` keeps input samples that did not fill a whole output sample, so chunks join cleanly.
+function downsample(chunk) {
+  const input = new Float32Array(carry.length + chunk.length);
+  input.set(carry); input.set(chunk, carry.length);
+  const n = Math.floor(input.length / ratio);
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(Math.floor((i + 1) * ratio), input.length);
+    let sum = 0;
+    for (let j = start; j < end; j++) sum += input[j];
+    const s = Math.max(-1, Math.min(1, sum / Math.max(1, end - start)));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  carry = input.slice(Math.floor(n * ratio));
+  return out;
+}
+
+// Topics come from the server's question bank, so the page can only offer topics that have questions.
+async function loadTopics() {
+  try {
+    const response = await fetch('/topics');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const topicSelect = $('topic');
+    topicSelect.textContent = '';
+    for (const name of data.topics) {
+      const option = document.createElement('option');
+      option.textContent = name; // textContent: the value is the same string
+      topicSelect.appendChild(option);
+    }
+    topicSelect.disabled = false;
+    topicsLoaded = data.topics.length > 0;
+    if (!topicsLoaded) statusEl.textContent = 'the question bank has no topics';
+  } catch (err) {
+    statusEl.textContent = `could not load topics (${err.message}) - reload the page`;
+  }
+  refresh();
+}
+
+function connect() {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${scheme}://${location.host}/ws`);
+  ws.onopen = () => { statusEl.textContent = 'connected'; connected = true; refresh(); };
+  ws.onclose = () => { statusEl.textContent = 'disconnected - reload the page'; connected = false; cancelSpeech(); refresh(); };
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'session') {
+      statusEl.textContent = `connected, session ${msg.session_id.slice(0, 8)}`;
+    } else if (msg.type === 'state') {
+      state = msg.state;
+      if (state === 'listening') busy = false;
+      // Not on 'ending' / 'ended': the closing line must still play. An End that interrupted a reply already sent an error,
+      // and every error discards queued speech.
+      if (state === 'paused' || state === 'idle') cancelSpeech();
+      statusEl.textContent = `session ${msg.session_id.slice(0, 8)}: ${state === 'ending' ? 'wrapping up…' : state}`;
+      refresh();
+    } else if (msg.type === 'transcript') {
+      const roundTrip = Math.round(performance.now() - stopPressedAt);
+      addLine(`You: ${msg.text}`, 'you');
+      timingEl.textContent =
+        `audio ${msg.audio_ms} ms | asr ${msg.asr_ms} ms | rtf ${msg.rtf} | ` +
+        `stop->text ${roundTrip} ms (browser clock, includes network) | asr provider ${msg.provider}`;
+      if (msg.delivery) {
+        const d = msg.delivery;
+        timingEl.textContent += ` | delivery: ${d.words} words, ${d.wpm === null ? 'rate n/a' : d.wpm + ' wpm'}, ` +
+          `${d.fillers} fillers, ${d.pauses} pauses, ${d.speaking_s} s speaking`;
+      }
+      showProvider('asr', msg.provider);
+    } else if (msg.type === 'speak') {
+      showProvider('tts', msg.provider);
+      enqueueSpeech(msg);
+    } else if (msg.type === 'coach_delta') {
+      if (!coachLine) coachLine = addLine('Coach: ', 'coach');
+      coachLine.textContent += msg.text;
+    } else if (msg.type === 'coach_done') {
+      if (!coachLine) coachLine = addLine('', 'coach');
+      coachLine.textContent = `Coach: ${msg.text}`;
+      coachLine = null;
+      const llmTiming = msg.provider === 'fallback' ? 'LLM failed or gave invalid output: canned acknowledgement'
+        : msg.llm_ttft_ms === null ? 'from the question bank, no LLM call'
+        : `llm ttft ${msg.llm_ttft_ms} ms, total ${msg.llm_total_ms} ms (complete before speaking: follow-ups are not streamed)`;
+      timingEl.textContent += ` | ${llmTiming} | provider ${msg.provider}` +
+        ` | tts ${msg.tts_provider}: first sentence ${msg.first_sentence_ms} ms, first speak sent ${msg.first_speak_ms} ms (server, from turn start)`;
+      showProvider('llm', msg.provider);
+    } else if (msg.type === 'summary') {
+      const why = END_REASON_TEXT[msg.end_reason] || msg.end_reason;
+      summaryEl.textContent = `Interview ended: ${why}.\n\nSummary (${msg.provider}):\n${msg.text}`;
+      if (msg.delivery) {
+        // Measured by the server, not written by the LLM. Caveats are shown with the numbers, not hidden in the docs.
+        summaryEl.textContent += `\n\nDelivery (measured): ${msg.delivery}\n` +
+          'Pauses come from the audio; words and fillers from the transcript. Speech recognition often drops "um" and ' +
+          '"uh", so the filler count is a lower bound' +
+          (warnings.has('asr') ? '; with the FAKE speech recognition, word count and rate describe placeholder text.' : '.');
+      }
+      showProvider('llm', msg.provider);
+    } else if (msg.type === 'error') {
+      if (msg.reason === 'speech failed') { // only the voice failed: the reply keeps streaming as text, sentences already queued still play
+        addLine(`error: ${msg.reason}`, 'error');
+        return;
+      }
+      if (coachLine) { coachLine.remove(); coachLine = null; } // partial reply from a failed turn: discard text and queued speech
+      cancelSpeech();
+      busy = false;
+      addLine(`error: ${msg.reason}`, 'error');
+      refresh();
+    }
+  };
+}
+
+async function startRecording() {
+  cancelSpeech(); // the mic would pick up the coach's voice from the speakers
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+  } catch (err) {
+    addLine(`microphone unavailable: ${err.name}`, 'error');
+    return;
+  }
+  ctx = new AudioContext();
+  ratio = ctx.sampleRate / TARGET_RATE;
+  carry = new Float32Array(0);
+  const url = URL.createObjectURL(new Blob([workletSource], { type: 'application/javascript' }));
+  await ctx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+  node = new AudioWorkletNode(ctx, 'batcher');
+  node.port.onmessage = (e) => {
+    if (recording && ws.readyState === WebSocket.OPEN) ws.send(downsample(e.data).buffer);
+  };
+  ctx.createMediaStreamSource(stream).connect(node); // not connected to speakers: no feedback
+
+  ws.send(JSON.stringify({ type: 'utterance_start', sample_rate: TARGET_RATE }));
+  recording = true;
+  toggle.textContent = 'Stop & send';
+  statusEl.textContent = `recording (mic ${ctx.sampleRate} Hz -> ${TARGET_RATE} Hz)`;
+  refresh();
+}
+
+async function stopRecording() {
+  recording = false;
+  busy = true;
+  refresh();
+  stream.getTracks().forEach((t) => t.stop());
+  await ctx.close();
+  stopPressedAt = performance.now();
+  awaitingFirstAudio = true; // the next first sound is the reply to this answer
+  ws.send(JSON.stringify({ type: 'utterance_end' }));
+  toggle.textContent = 'Start recording';
+  statusEl.textContent = 'transcribing…';
+}
+
+toggle.onclick = () => (recording ? stopRecording() : startRecording());
+startBtn.onclick = () => {
+  cancelSpeech(); warnings.clear(); renderWarn();
+  list.textContent = ''; summaryEl.textContent = ''; timingEl.textContent = '';
+  ws.send(JSON.stringify({
+    type: 'start', topic: $('topic').value, difficulty: $('difficulty').value, question_count: Number($('count').value),
+  }));
+};
+pauseBtn.onclick = () => ws.send(JSON.stringify({ type: 'pause' }));
+resumeBtn.onclick = () => ws.send(JSON.stringify({ type: 'resume' }));
+endBtn.onclick = () => ws.send(JSON.stringify({ type: 'end' }));
+loadTopics();
+connect();
+</script>
+</body>
+</html>

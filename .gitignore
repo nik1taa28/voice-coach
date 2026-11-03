@@ -4,3 +4,11 @@ __pycache__/
 .pytest_cache/
 .env
 .DS_Store
+
+# Load-test output: keep the small CSV/JSON that docs/performance.md cites, drop logs and discarded runs
+loadtest/results/**/*.log
+loadtest/results/*.log
+loadtest/results/*.HUNG
+loadtest/results/archive-*/
+loadtest/results/invalid-*/
+loadtest/results/smoke/
