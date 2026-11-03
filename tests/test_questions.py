@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from backend.questions import QuestionBankError, load_bank, pick_question, topics
+from backend.questions import DEFAULT_BANK_PATH, QuestionBankError, load_bank, pick_question, topics
 from backend.session_state import DIFFICULTIES
 
 
@@ -23,6 +23,11 @@ def test_shipped_bank_loads_and_covers_every_topic_and_level():
     for topic in topics(bank):
         for difficulty in DIFFICULTIES:
             assert any(q.topic == topic and q.difficulty == difficulty for q in bank), (topic, difficulty)
+
+
+def test_shipped_bank_lives_in_the_data_folder():
+    # The Dockerfile copies data/ separately; if the default moved back into backend/, the image and this test would disagree.
+    assert DEFAULT_BANK_PATH.parent.name == "data" and DEFAULT_BANK_PATH.is_file()
 
 
 def test_shipped_bank_has_at_least_two_questions_per_cell_so_a_session_can_continue():

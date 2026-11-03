@@ -51,7 +51,7 @@ flowchart LR
 - **Honest streaming:** audio is streamed in, but ASR waits for the whole utterance. The LLM reply streams in pieces, and each *complete sentence* goes to TTS while the model writes the next one. It is not token-level TTS.
 - **State machine** (`session_state.py`): idle, listening, thinking, paused, ended. Every event is checked in one place; history is written only when a reply is complete.
 - **Reliability (M4):** each answer runs as a cancellable task so the server keeps reading Pause / End / disconnect. Per-stage deadlines; the LLM is retried once, only before its first piece (a later retry would repeat text the user already saw); a closed tab cancels the work and closes the upstream stream.
-- **Question bank:** the main questions are curated data (`question_bank.json`), spoken word for word with no LLM call. The LLM only writes follow-ups (default 2 per question, `FOLLOWUPS_PER_QUESTION`) and the end summary, and sees the question's key points so it can probe what you missed. The session plans each turn first and commits the plan only when the turn succeeds, so a failed or cancelled turn changes nothing.
+- **Question bank:** the main questions are curated data (`data/question_bank.json`), spoken word for word with no LLM call. The LLM only writes follow-ups (default 2 per question, `FOLLOWUPS_PER_QUESTION`) and the end summary, and sees the question's key points so it can probe what you missed. The session plans each turn first and commits the plan only when the turn succeeds, so a failed or cancelled turn changes nothing.
 - **Timing:** server stages use `time.perf_counter()`. The browser measures stop-press to first sound on its own clock; the two clocks are never mixed.
 
 Full detail, protocol and per-part status (Planned / Implemented / Verified): [docs/architecture.md](docs/architecture.md). Design decisions and what I learned: [docs/learning-notes.md](docs/learning-notes.md).
@@ -123,8 +123,9 @@ backend/
   sentences.py       streaming sentence splitter
   prompts.py         prompts (follow-up with key points, end summary) + history window
   questions.py       curated question bank: load, validate, pick (pure)
-  question_bank.json the questions: topic, difficulty, key points
   asr/ llm/ tts/     provider interface + fake + real implementations
+data/
+  question_bank.json the questions: id, topic, difficulty, question, key points
 frontend/            index.html (the app) and dashboard.html, plain HTML + vanilla JS
 loadtest/            Locust file, sweep/warm-up/summary scripts, raw results
 tests/               pytest; fakes with slow / failing modes

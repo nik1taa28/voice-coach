@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DIFFICULTIES = ("easy", "medium", "hard")
-DEFAULT_BANK_PATH = Path(__file__).with_name("question_bank.json")
+DEFAULT_BANK_PATH = Path(__file__).resolve().parent.parent / "data" / "question_bank.json"  # data, not code: lives outside backend/
 DEFAULT_FOLLOWUPS = 2
 MAX_FOLLOWUPS = 5
 

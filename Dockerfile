@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$WITH_ASR" = "1" ]; then pip install --no-cache-dir -r requirements-asr.txt; fi
 
 COPY backend ./backend
+COPY data ./data
 COPY frontend ./frontend
 
 # Do not run as root inside the container.
