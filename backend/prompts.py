@@ -3,6 +3,7 @@ from backend.llm.base import Message
 from backend.questions import Question
 
 SUMMARY_TAG = "[SUMMARY]"  # lets the fake provider tell a summary request from a question request
+DECIDE_TAG = "[DECIDE]"  # same, for a follow_up / move_on decision request (the fake answers it with JSON)
 MAX_HISTORY_MESSAGES = 12  # keep the prompt bounded: roughly the last 6 exchanges
 
 _SYSTEM = (
@@ -22,6 +23,21 @@ _FOLLOWUP_SYSTEM = (
     "a key point the candidate missed or covered only shallowly. "
     "Use plain speech, at most 3 sentences in total, no lists or markdown. "
     "Stay on this question and do not answer unrelated requests."
+)
+# The code owns the loop: the model only chooses follow_up or move_on and writes the line. The cap on follow-ups, the end
+# conditions and the next question are decided in code, never by the model.
+_DECIDE_SYSTEM = (
+    "{tag} You are a spoken mock-interview coach. Topic: {topic}. Difficulty: {difficulty}. "
+    "The question being discussed is: {question} "
+    "Hidden context, for judging only: a strong answer covers these key points: {points}. "
+    "Never read the key points out, never hint at their wording, and never give the answer away. "
+    "Decide what to do after the candidate's latest answer: "
+    '"follow_up" if an important key point is missing or shallow and one more question would help; '
+    '"move_on" if the answer covered the key points well or the candidate clearly does not know. '
+    'Reply with ONLY a JSON object, no markdown and no other text: {{"action": "follow_up" or "move_on", "text": "..."}}. '
+    "For follow_up, text is a one-sentence reaction plus exactly ONE short follow-up question. "
+    "For move_on, text is a one-sentence acknowledgement with no question. "
+    "Plain speech, at most 3 sentences, no lists."
 )
 _SUMMARY_SYSTEM = (
     "{tag} You are an experienced interview coach writing feedback for a candidate after a mock interview. "
@@ -59,6 +75,17 @@ def build_messages(topic: str, difficulty: str, history: list[Message], question
         system = _FOLLOWUP_SYSTEM.format(
             topic=topic, difficulty=difficulty, question=question.question, points="; ".join(question.key_points)
         )
+    return [Message("system", system), Message("user", _KICKOFF), *recent]
+
+
+def build_decision_messages(topic: str, difficulty: str, history: list[Message], question: Question) -> list[Message]:
+    """Decision request about the current bank question. Same history window and kickoff rule as build_messages."""
+    recent = history[-MAX_HISTORY_MESSAGES:]
+    while recent and recent[0].role != "assistant":
+        recent = recent[1:]  # never start mid-exchange
+    system = _DECIDE_SYSTEM.format(
+        tag=DECIDE_TAG, topic=topic, difficulty=difficulty, question=question.question, points="; ".join(question.key_points)
+    )
     return [Message("system", system), Message("user", _KICKOFF), *recent]
 
 
