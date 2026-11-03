@@ -30,7 +30,7 @@ class SessionError(ValueError):
 class TurnPlan:
     """What the coach does next. Decided before the turn runs, applied to the session only if the turn succeeds."""
 
-    kind: Literal["bank", "followup", "wrapup", "end"]  # bank: next bank question; followup: LLM probes the current one; end: closing line
+    kind: Literal["bank", "followup", "end"]  # bank: next bank question; followup: LLM probes the current one; end: closing line
     question: Question | None  # the bank question (new for "bank", current for "followup", None otherwise)
     end_reason: EndReason | None = None  # set only for "end"
 
@@ -138,15 +138,6 @@ class InterviewSession:
             return TurnPlan("end", None, EndReason.BANK_EXHAUSTED)
         return TurnPlan("bank", question)
 
-    def plan_turn(self, bank: list[Question], followups_per_question: int, rng: random.Random | None = None) -> TurnPlan:
-        """Decide the coach's next move. Pure: it changes nothing, so a turn that fails or is cancelled leaves the session as it was."""
-        if self.current is not None and self.followups_used < followups_per_question:
-            return TurnPlan("followup", self.current)
-        question = pick_question(bank, self.topic, self.difficulty, {q.id for q in self._asked}, rng)
-        if question is None:
-            return TurnPlan("wrapup", None)
-        return TurnPlan("bank", question)
-
     def add_user(self, text: str) -> None:
         """listening -> thinking."""
         self._require(State.LISTENING, event="answer")
@@ -174,18 +165,12 @@ class InterviewSession:
         elif plan.kind == "followup":
             self.followups_used += 1
 
-    def fail_turn(self) -> None:
-        """thinking -> listening (or idle if the opener failed). Drops the unanswered user message so roles still alternate."""
-        self._require(State.THINKING, event="fail a turn")
-        self._roll_back_turn()
-
     def cancel_turn(self) -> None:
-        """Same rollback as fail_turn, for a turn the user (pause/end) or a disconnect interrupted. Callers check the state first:
-        a turn that already finished is LISTENING and must keep its reply."""
+        """thinking -> listening (or idle if the opener was cancelled), for a turn that Pause / End / the time limit / an
+        unexpected error / a disconnect interrupted. Drops the unanswered user message so roles still alternate.
+        Callers check the state first: a turn that already finished is LISTENING and must keep its reply.
+        (Provider failures no longer roll back: they fall back to move_on, see main.decide.)"""
         self._require(State.THINKING, event="cancel a turn")
-        self._roll_back_turn()
-
-    def _roll_back_turn(self) -> None:
         if not self._history:
             self.state = State.IDLE
             return
@@ -200,10 +185,6 @@ class InterviewSession:
     def resume(self) -> None:
         self._require(State.PAUSED, event="resume")
         self.state = State.LISTENING
-
-    def end(self) -> None:
-        self._require(State.LISTENING, State.PAUSED, event="end")
-        self.state = State.ENDED
 
     def begin_ending(self, reason: EndReason) -> None:
         """listening / paused -> ending: End pressed, or the time limit fired while no turn was running.

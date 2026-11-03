@@ -6,26 +6,10 @@ SUMMARY_TAG = "[SUMMARY]"  # lets the fake provider tell a summary request from 
 DECIDE_TAG = "[DECIDE]"  # same, for a follow_up / move_on decision request (the fake answers it with JSON)
 MAX_HISTORY_MESSAGES = 12  # keep the prompt bounded: roughly the last 6 exchanges
 
-_SYSTEM = (
-    "You are a spoken mock-interview coach. Topic: {topic}. Difficulty: {difficulty}. "
-    "Ask ONE short question at a time (max 2 sentences, plain speech, no lists or markdown). "
-    "After each answer, reply with a brief reaction and one follow-up question that builds on it. "
-    "Stay on the interview; do not answer unrelated requests."
-)
-# Used when a bank question is being discussed. The question and key points live in the system prompt, not the history:
-# MAX_HISTORY_MESSAGES can trim the original question out of a long conversation.
-_FOLLOWUP_SYSTEM = (
-    "You are a spoken mock-interview coach. Topic: {topic}. Difficulty: {difficulty}. "
-    "The question being discussed is: {question} "
-    "A strong answer covers these key points: {points}. "
-    "Use the key points only to judge the candidate's answer. Never read them out and never give the answer away. "
-    "After each answer, give a brief reaction in one sentence, then ask exactly ONE short follow-up question that probes "
-    "a key point the candidate missed or covered only shallowly. "
-    "Use plain speech, at most 3 sentences in total, no lists or markdown. "
-    "Stay on this question and do not answer unrelated requests."
-)
 # The code owns the loop: the model only chooses follow_up or move_on and writes the line. The cap on follow-ups, the end
 # conditions and the next question are decided in code, never by the model.
+# The question and key points live in the system prompt, not the history: MAX_HISTORY_MESSAGES can trim the original
+# question out of a long conversation.
 _DECIDE_SYSTEM = (
     "{tag} You are a spoken mock-interview coach. Topic: {topic}. Difficulty: {difficulty}. "
     "The question being discussed is: {question} "
@@ -63,23 +47,9 @@ _SUMMARY_REQUEST = (
 _KICKOFF = "Begin the interview with your first question."
 
 
-def build_messages(topic: str, difficulty: str, history: list[Message], question: Question | None = None) -> list[Message]:
-    """System prompt + kickoff + the most recent history. The kickoff keeps the first non-system role 'user'.
-    With a bank question, the model writes a follow-up about it; without one it falls back to the generic coach prompt."""
-    recent = history[-MAX_HISTORY_MESSAGES:]
-    while recent and recent[0].role != "assistant":
-        recent = recent[1:]  # never start mid-exchange
-    if question is None:
-        system = _SYSTEM.format(topic=topic, difficulty=difficulty)
-    else:
-        system = _FOLLOWUP_SYSTEM.format(
-            topic=topic, difficulty=difficulty, question=question.question, points="; ".join(question.key_points)
-        )
-    return [Message("system", system), Message("user", _KICKOFF), *recent]
-
-
 def build_decision_messages(topic: str, difficulty: str, history: list[Message], question: Question) -> list[Message]:
-    """Decision request about the current bank question. Same history window and kickoff rule as build_messages."""
+    """System prompt + kickoff + the most recent history, for a follow_up / move_on decision about the current bank question.
+    The kickoff keeps the first non-system role 'user'."""
     recent = history[-MAX_HISTORY_MESSAGES:]
     while recent and recent[0].role != "assistant":
         recent = recent[1:]  # never start mid-exchange

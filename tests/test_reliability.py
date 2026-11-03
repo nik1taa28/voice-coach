@@ -2,11 +2,10 @@ import asyncio
 
 import pytest
 
-from backend.llm import FakeLLM, LLMError
-from backend.prompts import build_messages
+from backend.llm import FakeLLM, LLMError, Message
 from backend.reliability import StageTimeout, Timeouts, TurnRunner, stream_with_retry, with_deadline
 
-MSGS = build_messages("Python", "easy", [])
+MSGS = [Message("system", "test"), Message("user", "go")]  # untagged: the fake answers "Fake question 1: ..."
 
 
 def run(coro):

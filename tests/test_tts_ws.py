@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.audio import SAMPLE_RATE
+from backend.decision import FALLBACK_ACK
 from backend.llm import FakeLLM, LLMError
 from backend.main import app
 from backend.questions import Question
@@ -14,7 +15,8 @@ from backend.tts import BrowserTTS, FakeTTS
 
 client = TestClient(app)
 ONE_SECOND = b"\x00\x00" * SAMPLE_RATE
-REPLY = ["One. ", "Two. ", "Three."]  # three sentences in three pieces; the last has no trailing space
+# A follow_up decision whose text is three sentences, in three pieces; the last has no trailing space
+REPLY = ['{"action": "follow_up", "text": "One. ', "Two. ", 'Three."}']
 
 
 class ScriptedLLM(FakeLLM):
@@ -108,12 +110,16 @@ def test_bank_opener_is_spoken_by_tts_and_makes_no_llm_call(wire):
     assert llm.calls == []
 
 
-def test_speech_starts_before_the_llm_has_finished(wire):
+def test_a_follow_up_is_sent_whole_after_the_llm_finished_not_streamed(wire):
+    # Trade-off of the JSON decision: it must be complete and valid before anything is said, so speech can no longer
+    # start while the LLM is still writing (before the decision, sentence 1 went out while pieces 2 and 3 arrived).
     wire(ScriptedLLM(REPLY), FakeTTS())
     with client.websocket_connect("/ws") as ws:
-        kinds = [m["type"] for m in follow_up(ws)]
-    last_delta = max(i for i, k in enumerate(kinds) if k == "coach_delta")
-    assert kinds.index("speak") < last_delta  # sentence 1 went out while pieces 2 and 3 were still arriving
+        messages = follow_up(ws)
+    kinds = [m["type"] for m in messages]
+    deltas = of_type(messages, "coach_delta")
+    assert [d["text"] for d in deltas] == ["One. Two. Three."]  # one delta with the whole line
+    assert kinds.index("coach_delta") < kinds.index("speak")
 
 
 def test_fake_tts_sends_labelled_playable_audio_with_timing(wire):
@@ -138,7 +144,7 @@ def test_browser_tts_sends_text_only_and_no_synthesis_time(wire):
 
 
 def test_unterminated_tail_is_spoken_on_flush(wire):
-    wire(ScriptedLLM(["Hello ", "there"]), FakeTTS())
+    wire(ScriptedLLM(['{"action": "follow_up", "text": "Hello ', 'there"}']), FakeTTS())
     with client.websocket_connect("/ws") as ws:
         speaks = of_type(follow_up(ws), "speak")
     assert [m["text"] for m in speaks] == ["Hello there"]
@@ -170,14 +176,17 @@ def test_tts_failure_is_reported_once_and_the_turn_still_completes(wire):
     assert assistant == [BANK_Q.question, "One. Two. Three."]  # the complete reply is in history, not the unspoken remainder
 
 
-def test_llm_failure_mid_reply_sends_error_and_does_not_speak_the_unfinished_tail(wire):
-    wire(ScriptedLLM(["One. ", "Two"], fail_after=2), FakeTTS())
+def test_llm_failure_mid_reply_speaks_none_of_the_partial_reply(wire):
+    wire(ScriptedLLM(['{"action": "follow_up", "text": "One. ', "Two"], fail_after=2), FakeTTS())
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
-        messages = answer(ws)  # the failed turn rolls back to listening
-    assert [m["text"] for m in of_type(messages, "speak")] == ["One."]  # already sent; client must cancel it on the error
-    assert "coach reply failed" in [m["reason"] for m in of_type(messages, "error")]
-    assert not of_type(messages, "coach_done")
+        ws.send_json({"type": "utterance_start", "sample_rate": SAMPLE_RATE})
+        ws.send_bytes(ONE_SECOND)
+        ws.send_json({"type": "utterance_end"})
+        messages = read_until(ws, "coach_done")  # one-question bank: the fallback move_on ends the interview
+    spoken = [m["text"] for m in of_type(messages, "speak")]
+    assert spoken[0] == FALLBACK_ACK and not any("One." in t for t in spoken)  # nothing unvalidated reached the speaker
+    assert not of_type(messages, "error") and of_type(messages, "coach_done")[0]["provider"] == "fallback"
 
 
 def test_playback_started_is_accepted_silently(wire):

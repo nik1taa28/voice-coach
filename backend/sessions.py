@@ -92,12 +92,15 @@ def _round_or_none(value: float | None) -> float | None:
     return None if value is None else round(value, 1)
 
 
-def build_summary(session_id: str, text: str, provider: str, ttft_ms: float | None, total_ms: float | None) -> dict:
+def build_summary(
+    session_id: str, text: str, provider: str, ttft_ms: float | None, total_ms: float | None, end_reason: str | None = None
+) -> dict:
     return {
         "type": "summary",
         "session_id": session_id,
         "text": text,
         "provider": provider,
+        "end_reason": end_reason,  # question_limit / time_limit / bank_exhausted / manual
         "llm_ttft_ms": None if ttft_ms is None else round(ttft_ms, 1),
         "llm_total_ms": None if total_ms is None else round(total_ms, 1),
     }

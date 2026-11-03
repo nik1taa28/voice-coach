@@ -1,6 +1,7 @@
 """M4 reliability over the real /ws route: cancellation, deadlines, retry, cleanup. Slow/failing fakes, tiny timeouts."""
 import asyncio
 import random
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,23 +18,28 @@ ONE_SECOND = b"\x00\x00" * SAMPLE_RATE
 
 
 class ScriptLLM(FakeLLM):
-    """Per call: 'ok' streams 3 sentences; 'hang' streams 2 pieces then stalls forever. `closed` counts finished streams."""
+    """Per call: 'ok' streams a follow_up decision in 3 pieces; 'hang' streams 2 pieces then stalls forever.
+    `closed` counts finished streams. `stalled` is set just before a hang: follow-ups are no longer streamed to the client
+    (the JSON is validated first), so the test cannot see deltas and waits on this instead. A threading.Event, because
+    TestClient runs the app in another thread."""
 
     def __init__(self, *modes: str) -> None:
         super().__init__()
         self.modes = modes
         self.prompts: list = []
         self.closed = 0
+        self.stalled = threading.Event()
 
     async def stream(self, messages):
         self.prompts.append(messages)
         mode = self.modes[min(len(self.prompts) - 1, len(self.modes) - 1)]
         try:
-            yield "Alpha. "
+            yield '{"action": "follow_up", "text": "Alpha. '
             yield "Beta. "
             if mode == "hang":
+                self.stalled.set()
                 await asyncio.Event().wait()
-            yield "Gamma."
+            yield 'Gamma?"}'
         finally:
             self.closed += 1  # runs on completion, cancellation, or aclose(): proves the stream was released
 
@@ -46,8 +52,12 @@ class ExplodingLLM(FakeLLM):
 
 @pytest.fixture(autouse=True)
 def one_question_bank(monkeypatch):
-    """The opener is a bank question and never calls the LLM. Every LLM call in these tests is a follow-up to an answer."""
-    monkeypatch.setattr("backend.main.question_bank", [Question("t-1", "Python basics", "easy", "What is a list?", ("mutable",))])
+    """The opener is a bank question and never calls the LLM. Every LLM call in these tests is a decision about an answer.
+    Two questions, so a fallback move_on has somewhere to go instead of ending the interview."""
+    monkeypatch.setattr("backend.main.question_bank", [
+        Question("t-1", "Python basics", "easy", "What is a list?", ("mutable",)),
+        Question("t-2", "Python basics", "easy", "What is a tuple?", ("immutable",)),
+    ])
     monkeypatch.setattr("backend.main.followups", 2)
     monkeypatch.setattr("backend.main.question_rng", random.Random(0))
 
@@ -71,11 +81,8 @@ def read_until(ws, kind, **fields):
             return seen
 
 
-def wait_for_deltas(ws, count):
-    seen = []
-    while sum(1 for m in seen if m["type"] == "coach_delta") < count:
-        seen.append(ws.receive_json())
-    return seen
+def wait_until_stalled(llm: ScriptLLM) -> None:
+    assert llm.stalled.wait(timeout=5), "the LLM never reached its stall point"
 
 
 def start_interview(ws):
@@ -108,7 +115,7 @@ def test_pause_during_reply_cancels_it_and_leaves_no_half_exchange(wire):
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
         send_answer(ws)
-        wait_for_deltas(ws, 2)  # the second reply is now stalled mid-stream
+        wait_until_stalled(llm)  # the decision is now stalled mid-stream
         ws.send_json({"type": "pause"})
         msgs = read_until(ws, "state", state="paused")
         assert reasons(msgs) == ["turn cancelled"]
@@ -122,16 +129,18 @@ def test_pause_during_reply_cancels_it_and_leaves_no_half_exchange(wire):
 
 
 def test_end_during_reply_cancels_it_then_summarises_what_was_complete(wire):
-    wire(ScriptLLM("hang"))
+    llm = ScriptLLM("hang")
+    wire(llm)
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
         send_answer(ws)
-        wait_for_deltas(ws, 2)
+        wait_until_stalled(llm)
         ws.send_json({"type": "end"})
-        msgs = read_until(ws, "summary")
+        msgs = read_until(ws, "state", state="ended")
         assert reasons(msgs) == ["turn cancelled"]
-        assert [m["state"] for m in msgs if m["type"] == "state"] == ["ended"]
-        assert msgs[-1]["provider"] == "none"  # the only answer was interrupted, so no complete answers exist
+        assert [m["state"] for m in msgs if m["type"] == "state"][-2:] == ["ending", "ended"]
+        summary = next(m for m in msgs if m["type"] == "summary")
+        assert summary["provider"] == "none"  # the only answer was interrupted, so no complete answers exist
 
 
 def test_pause_during_asr_cancels_it(wire):
@@ -165,16 +174,17 @@ def test_second_utterance_while_asr_is_running_is_rejected_as_busy(wire):
         assert ws.receive_json()["reason"].startswith("busy")
 
 
-def test_pause_while_ended_does_not_kill_the_summary(wire):
+def test_pause_while_ending_does_not_kill_the_summary(wire):
     wire(ScriptLLM("ok"))
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
         send_answer(ws)
         read_until(ws, "state", state="listening")
         ws.send_json({"type": "end"})
-        ws.send_json({"type": "pause"})  # rejected, and must not cancel the summary task
+        ws.send_json({"type": "pause"})  # rejected, and must not cancel the closing line or the summary
+        rejected = {"cannot pause while ending", "cannot pause while ended"}  # depends on how far the ending got
         msgs = []
-        while not (any(m["type"] == "summary" for m in msgs) and "cannot pause while ended" in reasons(msgs)):
+        while not (any(m["type"] == "summary" for m in msgs) and rejected & set(reasons(msgs))):
             msgs.append(ws.receive_json())  # the error and the summary may arrive in either order
         assert [m for m in msgs if m["type"] == "summary"][0]["provider"] == "fake"
         assert "turn cancelled" not in reasons(msgs)
@@ -188,22 +198,14 @@ def test_disconnect_mid_reply_releases_the_llm_stream(wire):
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
         send_answer(ws)
-        wait_for_deltas(ws, 2)
+        wait_until_stalled(llm)
     # leaving the block disconnects; the server's finally must cancel the turn, which closes the stream
     assert llm.closed == 1
 
 
 # --- deadlines and retry --------------------------------------------------------------------------------------------
 
-def test_hung_llm_times_out_after_one_retry_and_the_answer_rolls_back(wire, monkeypatch):
-    monkeypatch.setenv("TIMEOUT_LLM_FIRST_S", "0.05")
-    llm = FakeLLM(hang=True)
-    wire(llm)
-    with client.websocket_connect("/ws") as ws:
-        start_interview(ws)
-        msgs = answer_and_wait(ws)
-        assert reasons(msgs) == ["coach reply timed out"]
-    assert llm.stream_starts == 2  # first try + exactly one retry
+# A hung LLM now times out, is retried once, then falls back to move_on: see test_llm_ws.test_llm_timeout_falls_back_to_move_on.
 
 
 def test_flaky_llm_is_retried_invisibly(wire):
@@ -217,14 +219,17 @@ def test_flaky_llm_is_retried_invisibly(wire):
     assert llm.stream_starts == 2
 
 
-def test_failure_after_first_piece_is_not_retried(wire):
+def test_failure_after_first_piece_is_not_retried_and_falls_back(wire):
     llm = FakeLLM(fail_after_pieces=2)
     wire(llm)
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
         msgs = answer_and_wait(ws)
-        assert reasons(msgs) == ["coach reply failed"]
-    assert llm.stream_starts == 1  # a retry would have sent the first words twice
+        assert reasons(msgs) == []  # the candidate hears the fallback acknowledgement, not an error
+        assert next(m for m in msgs if m["type"] == "coach_done")["provider"] == "fallback"
+    # The M4 rule (never retry after the first piece) is unchanged. Since decisions are no longer forwarded piece by piece,
+    # a retry here would no longer repeat words to the client; relaxing the rule is left as a deliberate, separate change.
+    assert llm.stream_starts == 1
 
 
 def test_tts_hang_degrades_to_text_only(wire, monkeypatch):
@@ -258,8 +263,9 @@ def test_summary_hang_times_out_but_session_still_ends(wire, monkeypatch):
         read_until(ws, "state", state="listening")
         llm.modes = ("hang",)
         ws.send_json({"type": "end"})
-        msgs = read_until(ws, "error", reason="summary timed out")
-        assert [m["state"] for m in msgs if m["type"] == "state"] == ["ended"]
+        msgs = read_until(ws, "state", state="ended")  # the session still closes
+        assert "summary timed out" in reasons(msgs)
+        assert [m["state"] for m in msgs if m["type"] == "state"] == ["ending", "ended"]
 
 
 def test_unexpected_error_in_a_turn_is_reported_not_swallowed(wire):

@@ -1,6 +1,7 @@
 """M5: the real /ws route feeds the metrics registry, and GET /metrics reports it."""
 import asyncio
 import random
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,8 +31,16 @@ class HangingLLM(FakeLLM):
 
 
 class SlowAfterFirstLLM(FakeLLM):
+    """Sends one piece, then stalls. `stalled` is set at the stall: the test cannot see the piece (decisions are not
+    forwarded until complete), so it waits on this. A threading.Event, because TestClient runs the app in another thread."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stalled = threading.Event()
+
     async def stream(self, messages):
-        yield "Alpha. "
+        yield '{"action": '
+        self.stalled.set()
         await asyncio.Event().wait()
 
 
@@ -125,35 +134,49 @@ def answer_after_opener(ws):
     send_answer(ws)
 
 
-def test_llm_failure_counts_failed_and_records_no_latency(wire):
+# An LLM problem during a decision no longer fails the turn: the candidate gets the fallback acknowledgement and the next
+# line, so the turn counts as turn_ok and the problem shows up in decision_fallback (not in error_rate).
+
+
+def test_llm_failure_counts_a_decision_fallback_and_records_no_latency(wire):
     wire(llm=FailingLLM())
     with client.websocket_connect("/ws") as ws:
         answer_after_opener(ws)
-        read_until(ws, "error", reason="coach reply failed")
+        read_until(ws, "coach_done", provider="fallback")
     snap = snapshot()
-    assert snap["counts"]["turn_failed"] == 1
-    assert snap["counts"]["turn_ok"] == 1  # the opener
-    assert snap["stages"]["llm_total"]["n"] == 0  # a failed turn's partial timing must not look like a good sample
-    assert snap["error_rate"] == 0.5
+    assert snap["counts"]["decision_fallback"] == 1
+    assert snap["counts"]["turn_ok"] == 2 and snap["counts"]["turn_failed"] == 0  # the opener and the fallback turn
+    assert snap["stages"]["llm_total"]["n"] == 0  # no complete LLM reply, so no latency sample
 
 
-def test_llm_first_piece_timeout_counts_timeout(wire, monkeypatch):
+def test_llm_first_piece_timeout_counts_a_decision_fallback(wire, monkeypatch):
     monkeypatch.setenv("TIMEOUT_LLM_FIRST_S", "0.05")
     wire(llm=HangingLLM())
     with client.websocket_connect("/ws") as ws:
         answer_after_opener(ws)
-        read_until(ws, "error", reason="coach reply timed out")
-    assert snapshot()["counts"]["turn_timeout"] == 1
+        read_until(ws, "coach_done", provider="fallback")
+    counts = snapshot()["counts"]
+    assert counts["decision_fallback"] == 1 and counts["turn_timeout"] == 0
 
 
-def test_failure_after_first_piece_is_not_retried_and_counts_once(wire, monkeypatch):
+def test_timeout_after_first_piece_is_not_retried_and_counts_once(wire, monkeypatch):
     monkeypatch.setenv("TIMEOUT_LLM_TOTAL_S", "0.1")
     wire(llm=SlowAfterFirstLLM())
     with client.websocket_connect("/ws") as ws:
         answer_after_opener(ws)
-        read_until(ws, "error", reason="coach reply timed out")
+        read_until(ws, "coach_done", provider="fallback")
     counts = snapshot()["counts"]
-    assert counts["turn_timeout"] == 1 and counts["turn_failed"] == 0
+    assert counts["decision_fallback"] == 1 and counts["turn_failed"] == 0 and counts["turn_timeout"] == 0
+
+
+def test_invalid_llm_output_counts_a_decision_fallback_but_keeps_its_latency(wire):
+    wire(llm=FakeLLM(decision_reply="Sure! Next question."))
+    with client.websocket_connect("/ws") as ws:
+        answer_after_opener(ws)
+        read_until(ws, "coach_done", provider="fallback")
+    snap = snapshot()
+    assert snap["counts"]["decision_fallback"] == 1
+    assert snap["stages"]["llm_total"]["n"] == 1  # the LLM did answer in full, so its timing is a real sample
 
 
 def test_asr_failure_counts_failed(wire):
@@ -182,12 +205,13 @@ def test_speech_failure_is_separate_from_turn_errors(wire):
 
 
 def test_cancelled_turn_is_not_an_error(wire):
-    wire(llm=SlowAfterFirstLLM())
+    llm = SlowAfterFirstLLM()
+    wire(llm=llm)
     with client.websocket_connect("/ws") as ws:
         start_interview(ws)
         read_until(ws, "coach_done")
         send_answer(ws)
-        read_until(ws, "coach_delta", text="Alpha. ")  # the follow-up has started streaming
+        assert llm.stalled.wait(timeout=5)  # the decision has started and is stalled
         ws.send_json({"type": "pause"})
         read_until(ws, "error", reason="turn cancelled")
     snap = snapshot()

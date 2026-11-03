@@ -9,7 +9,7 @@ from typing import Literal, Sequence
 
 ACTIONS = ("follow_up", "move_on")
 MAX_TEXT_CHARS = 400  # about 3 spoken sentences; a longer reply means the model ignored the format
-FALLBACK_ACK = "Thanks for that answer. Let's move on."
+FALLBACK_ACK = "Thanks for that answer."  # followed by the next question or the closing line, so it must fit before both
 
 
 class DecisionError(ValueError):

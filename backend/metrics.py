@@ -9,7 +9,7 @@ from collections import deque
 from typing import Mapping
 
 STAGES = ("asr", "llm_ttft", "llm_total", "first_sentence", "first_speak", "tts")
-COUNTERS = ("turn_ok", "turn_failed", "turn_timeout", "turn_cancelled", "speech_failed", "rejected_samples")
+COUNTERS = ("turn_ok", "turn_failed", "turn_timeout", "turn_cancelled", "speech_failed", "decision_fallback", "rejected_samples")
 WINDOW = 1000  # samples kept per stage; percentiles describe the most recent WINDOW, not all time
 
 
