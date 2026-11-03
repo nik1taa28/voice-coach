@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 
 import pytest
 
@@ -10,8 +11,8 @@ BANK_Q = Question("t-1", "Python basics", "easy", "What is a list?", ("mutable",
 
 
 def build_messages(topic: str, difficulty: str, history: list[Message]) -> list[Message]:
-    """The only per-turn LLM prompt is now the decision prompt about a bank question."""
-    return build_decision_messages(topic, difficulty, history, BANK_Q)
+    """The only per-turn LLM prompt is now the decision prompt about a bank question, judged at that question's level."""
+    return build_decision_messages(topic, history, dataclasses.replace(BANK_Q, difficulty=difficulty))
 
 
 def collect(llm, messages) -> list[str]:
@@ -135,9 +136,21 @@ def test_gemini_summary_payload_ends_with_a_user_turn():
 
 def test_summary_prompt_lists_the_questions_asked_and_their_key_points():
     system = build_summary_messages("Python basics", "easy", [Message("assistant", "q"), Message("user", "a"), Message("assistant", "f")], [BANK_Q])[0].text
-    assert "1. What is a list?" in system and "mutable; ordered" in system
+    assert "1. [easy] What is a list?" in system and "mutable; ordered" in system  # each question with its own level
     assert "do not credit points that were not said" in system
 
 
 def test_summary_prompt_without_questions_is_unchanged():
     assert "key points" not in build_summary_messages("Python basics", "easy", [Message("assistant", "q")])[0].text
+
+
+def test_decision_prompt_uses_the_question_level_not_the_chosen_one():
+    borrowed = dataclasses.replace(BANK_Q, difficulty="hard")  # the chosen level ran out, so a hard question was borrowed
+    assert "Difficulty: hard" in build_decision_messages("Python basics", [], borrowed)[0].text
+
+
+def test_summary_prompt_says_to_judge_a_borrowed_question_at_its_own_level():
+    hard_q = dataclasses.replace(BANK_Q, id="t-2", difficulty="hard", question="What is the GIL?")
+    system = build_summary_messages("Python basics", "easy", [Message("assistant", "q")], [BANK_Q, hard_q])[0].text
+    assert "1. [easy] What is a list?" in system and "2. [hard] What is the GIL?" in system
+    assert "judge that answer against the question's own level" in system

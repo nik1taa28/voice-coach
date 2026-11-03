@@ -47,22 +47,26 @@ _SUMMARY_REQUEST = (
 _KICKOFF = "Begin the interview with your first question."
 
 
-def build_decision_messages(topic: str, difficulty: str, history: list[Message], question: Question) -> list[Message]:
+def build_decision_messages(topic: str, history: list[Message], question: Question) -> list[Message]:
     """System prompt + kickoff + the most recent history, for a follow_up / move_on decision about the current bank question.
     The kickoff keeps the first non-system role 'user'."""
     recent = history[-MAX_HISTORY_MESSAGES:]
     while recent and recent[0].role != "assistant":
         recent = recent[1:]  # never start mid-exchange
     system = _DECIDE_SYSTEM.format(
-        tag=DECIDE_TAG, topic=topic, difficulty=difficulty, question=question.question, points="; ".join(question.key_points)
+        # the question's own level: it may be borrowed from a neighbouring level when the chosen one ran out
+        tag=DECIDE_TAG, topic=topic, difficulty=question.difficulty, question=question.question, points="; ".join(question.key_points)
     )
     return [Message("system", system), Message("user", _KICKOFF), *recent]
 
 
 def _asked_block(asked: list[Question]) -> str:
-    lines = [f"{i}. {q.question} Key points: {'; '.join(q.key_points)}" for i, q in enumerate(asked, start=1)]
+    lines = [f"{i}. [{q.difficulty}] {q.question} Key points: {'; '.join(q.key_points)}" for i, q in enumerate(asked, start=1)]
     return (
-        " The questions asked, with the key points a strong answer covers:\n" + "\n".join(lines) + "\n"
+        " The questions asked, each with its own level in brackets and the key points a strong answer covers:\n"
+        + "\n".join(lines) + "\n"
+        "When a question's level differs from the chosen difficulty (the chosen level ran out of questions), judge that answer "
+        "against the question's own level. "
         "Use the key points only to judge which ones the candidate actually covered; do not credit points that were not said."
     )
 

@@ -64,7 +64,7 @@ time_limit_s = interview_time_limit_s()
 CLOSING_TEXT = {
     EndReason.QUESTION_LIMIT: "That was the last question. Thank you, here is your summary.",
     EndReason.TIME_LIMIT: "We are out of time. Thank you, here is your summary.",
-    EndReason.BANK_EXHAUSTED: "That was the last question for this topic and level. Here is your summary.",
+    EndReason.BANK_EXHAUSTED: "That was the last question for this topic. Here is your summary.",
     EndReason.MANUAL: "Thanks for practising. Here is your summary.",
 }
 
@@ -379,7 +379,7 @@ async def decide(llm, session: InterviewSession, timeouts: Timeouts) -> tuple[De
     (one retry before the first piece). Cancellation (Pause / End / disconnect) is not caught and passes straight through.
     """
     fallback = Decision("move_on", FALLBACK_ACK)
-    messages = build_decision_messages(session.topic, session.difficulty, session.history, session.current)
+    messages = build_decision_messages(session.topic, session.history, session.current)
     try:
         result = await stream_with_retry(lambda: llm.stream(messages), timeouts.llm_first_s, timeouts.llm_total_s)
     except StageTimeout as exc:

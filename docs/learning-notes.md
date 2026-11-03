@@ -588,3 +588,23 @@ sequenceDiagram
 - Several WebSocket tests waited for streamed deltas that no longer exist, so they hung instead of failing. The fix was a `threading.Event` the fake LLM sets at its stall point (TestClient runs the app in another thread), not a sleep.
 - "Thanks for that answer. Let's move on." read badly before "That was the last question", so the canned acknowledgement became just "Thanks for that answer.", which fits before both.
 - Awaiting the cancelled watchdog under `suppress(CancelledError)` could also swallow a cancellation of the WebSocket handler itself, so it is cancelled and not awaited.
+
+### Addendum: first real Gemini run of the loop (2026-11-03)
+
+```mermaid
+flowchart LR
+  C[chosen level] -->|empty| N1[nearest level] -->|empty| N2[farthest level] -->|empty| X[bank_exhausted]
+  C -->|has unasked| Q[question keeps its own level]
+  N1 -->|has unasked| Q
+  N2 -->|has unasked| Q
+```
+
+- **Found:** a 5-question interview ended after 2 questions. Every topic and level has only 2-6 questions, so `bank_exhausted` came first almost everywhere. The WebSocket tests had passed because they used tiny made-up banks, and none of them asked whether the *real* bank could fill a real interview. A test now checks that every topic has at least the default 6.
+- **Fix:** the chosen level is a preference, not a filter. When it runs out, the nearest level on the same topic is used. The decision prompt and summary prompt get each question's own level, so a borrowed easy question is not judged as hard.
+- **Measured:** time to first token 2183 ms and total 2197 ms at the median of 3 decision calls. Waiting for the complete JSON cost about 14 ms here, because the reply is short. One fallback, caused by an invalid reply; the reason is still to be read from the log.
+
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Thin bank | borrow the nearest level, same topic | write about 210 questions; cap the menu by what exists; accept early ends | no new content and the interview fills up; the level is no longer pure, so the prompts must judge each question at its own level |
+
+**Common mistake:** testing only with small hand-made data. The logic was right for the test bank and wrong for the real one. Add one test that runs your rules over the shipped data.

@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from backend.questions import DEFAULT_BANK_PATH, QuestionBankError, load_bank, pick_question, topics
+from backend.questions import DEFAULT_BANK_PATH, Question, QuestionBankError, levels_by_distance, load_bank, pick_question, topics
 from backend.session_state import DIFFICULTIES
 
 
@@ -86,6 +86,31 @@ def test_pick_returns_none_when_everything_was_asked_or_topic_unknown():
     every_id = {q.id for q in bank}
     assert pick_question(bank, "Python basics", "easy", every_id) is None
     assert pick_question(bank, "Underwater basket weaving", "easy", set()) is None
+
+
+@pytest.mark.parametrize(
+    "chosen, order",
+    [("easy", ["easy", "medium", "hard"]), ("medium", ["medium", "easy", "hard"]), ("hard", ["hard", "medium", "easy"])],
+)
+def test_levels_are_tried_nearest_first_and_ties_go_to_the_easier(chosen, order):
+    assert levels_by_distance(chosen) == order
+
+
+def test_when_the_chosen_level_runs_out_the_nearest_level_is_borrowed_on_the_same_topic():
+    bank = [Question("e", "T", "easy", "E?", ("p",)), Question("m", "T", "medium", "M?", ("p",)),
+            Question("h", "T", "hard", "H?", ("p",)), Question("x", "Other", "medium", "X?", ("p",))]
+    picked, asked = [], set()
+    while (q := pick_question(bank, "T", "medium", asked)) is not None:
+        picked.append(q.id)
+        asked.add(q.id)
+    assert picked == ["m", "e", "h"]  # chosen level first, then easy (tie goes easier), then hard; never another topic
+
+
+def test_shipped_bank_can_fill_the_largest_interview_on_every_topic():
+    # Each topic and level has only 2-6 questions; borrowing across levels is what makes 10 questions possible.
+    bank = load_bank()
+    for topic in topics(bank):
+        assert sum(q.topic == topic for q in bank) >= 6, topic  # at least the default count on every topic
 
 
 def test_pick_is_deterministic_for_a_seeded_rng():

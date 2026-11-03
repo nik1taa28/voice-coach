@@ -72,9 +72,18 @@ def topics(bank: list[Question]) -> list[str]:
     return list(dict.fromkeys(q.topic for q in bank))
 
 
+def levels_by_distance(difficulty: str) -> list[str]:
+    """The chosen level first, then the others from nearest to farthest; ties go to the easier one (medium -> easy, hard)."""
+    chosen = DIFFICULTIES.index(difficulty)
+    return sorted(DIFFICULTIES, key=lambda level: (abs(DIFFICULTIES.index(level) - chosen), DIFFICULTIES.index(level)))
+
+
 def pick_question(bank: list[Question], topic: str, difficulty: str, asked: set[str], rng: random.Random | None = None) -> Question | None:
-    """A random question for this topic and level that is not in `asked`, or None if there is none left."""
-    candidates = [q for q in bank if q.topic == topic and q.difficulty == difficulty and q.id not in asked]
-    if not candidates:
-        return None
-    return (rng or random).choice(candidates)
+    """A random unasked question on this topic, from the chosen level if any is left, otherwise from the nearest other
+    level (the bank has only 2-6 questions per topic and level, fewer than most interviews need). The question keeps its
+    own difficulty, so callers judge it against that. None only when the whole topic is used up."""
+    for level in levels_by_distance(difficulty):
+        candidates = [q for q in bank if q.topic == topic and q.difficulty == level and q.id not in asked]
+        if candidates:
+            return (rng or random).choice(candidates)
+    return None
