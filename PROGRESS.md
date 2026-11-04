@@ -2,7 +2,7 @@
 
 ## Summary (read this first)
 
-**Read first:** `docs/PROJECT_BRIEF.md` (sections 2, 6 and 8), then `docs/performance.md`. Current branch: `question-loop` (built on `m6-docker-ci`); nothing is merged to `main` or pushed.
+**Read first:** `docs/PROJECT_BRIEF.md` (sections 2, 6 and 8), then `docs/performance.md`. Current branch: `main`; the `question-loop` pull request (#1) is merged (`86c1133`).
 
 | | Status |
 |---|---|
@@ -23,7 +23,7 @@
 1. **The `invalid reply` log line** from the real Gemini run (search your server terminal). It says why one decision fell back.
 2. **One real session** with the new build: Python basics, 6 questions. It should reach 6 by borrowing levels. Check the delivery line under the summary with your real microphone, and the page in a browser.
 3. ~~Docker~~ done in demo mode (see `docs/architecture.md`). Optional: the `WITH_ASR=1` image.
-4. ~~CI~~ pushed by the user and green. Remaining: merge the pull request (`question-loop` into `main`) once happy with the diff.
+4. ~~CI~~ pushed by the user and green; pull request merged into `main`.
 5. **Review `data/question_bank.json`**: difficulty labels are my judgement. Python basics, Data structures and Databases and SQL have 6 questions each, so 8 or 10 question interviews end early there.
 6. A server from your terminal is listening on port 8001 (PID 28719). I never touched it. The old note about port 8000 is gone: nothing listens there now.
 
@@ -55,10 +55,12 @@ Fake providers, 1-100 users, 3 repeats: 0 failures, throughput about linear to 3
 - Testing the Whisper plateau guess (change `num_workers` / `cpu_threads`, rerun 8-16 users).
 - Open-loop load, separate load-generator machine, memory/CPU of the server, runs longer than 60 s.
 - Timeout tuning (M4 deadlines unchanged; the 30 s ASR deadline never fired in the Whisper test).
-- M6: Docker, GitHub Actions CI, README with verified numbers.
-- Question bank (planned after M6) and the delivery-feedback stretch goal.
+- The `WITH_ASR=1` Docker image (not built) and per-job CI details (only a user-reported green tick).
+- Delivery feedback with a real microphone, and the new pages seen in a browser.
+
+(M6, the question bank and delivery feedback are done; see the table above.)
 
 ## Housekeeping
 
-- `CLAUDE.md` has two uncommitted lines you added (question bank, delivery-feedback stretch). Left as is.
+- `.vscode/` is untracked.
 - `loadtest/results/` subfolders: `archive-1000-window/` (runs with the old 1000-sample window, valid), `invalid-u100-*` (the two hung runs), `experiment-cpu-burners/`, `smoke/`. `summarize.py` reads only the top-level files.

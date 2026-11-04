@@ -7,7 +7,7 @@ Measured numbers only. Anything not run is marked **pending**. Raw files: `loadt
 | | |
 |---|---|
 | Date | 2026-11-01 |
-| Code | commit `74ce23c` (M4) plus the uncommitted M5 working tree |
+| Code | commit `74ce23c` (M4) plus the then-uncommitted M5 working tree (committed afterwards as `6e1787a`; not re-diffed against what was measured) |
 | Machine | Apple M3, 8 cores, 16 GB, macOS 14.3, Python 3.13.6 |
 | Load generator | Locust 2.47.0 + websocket-client 1.9.2, **on the same laptop as the server** |
 | Server | one `uvicorn` process (one worker), started fresh for every step, JSON logging on, `METRICS_WINDOW=200000` (every sample of a step is kept) |

@@ -673,3 +673,131 @@ flowchart LR
 *Short answer:* Docker caches each layer. The dependency install only reruns when a requirements file changes. Copying the source first would invalidate that layer on every code edit, and every rebuild would reinstall everything.
 
 **Common mistake:** publishing the container port on all interfaces (`-p 8000:8000`). This app's `/metrics` has no authentication, so the README publishes it on `127.0.0.1` only.
+
+## Gap-fill: parts the older sections were missing (2026-11-04)
+
+Append-only, so the old text above is untouched. Each item below adds what that section lacked.
+
+### M0 and M1: where they are tested
+- M0: `tests/test_app.py` (health, echo, session id, bad JSON). M1: `tests/test_audio.py`, `tests/test_asr_ws.py`, `tests/test_whisper.py`. These tests use the fake ASR; real Whisper timings are in the M1 "Measured" section, not repeated here.
+- Correction: the question bank is `data/question_bank.json`, not `backend/question_bank.json` as the question-bank section says.
+
+### M6 / CI: what each job proves
+
+```mermaid
+flowchart LR
+  P[push] --> T[test job: clean env + pytest]
+  P --> D[docker job: build + curl endpoints]
+  T --> OK{both green}
+  D --> OK
+```
+
+**Key concept:** a clean environment is the test. Anything your laptop has that the requirements files do not declare fails in CI first.
+**Interview question:** Why two CI jobs and not one?
+*Short answer:* They fail for different reasons (a broken test vs a broken image) and run in parallel, so the failure tells you which half to look at.
+**Exercise:** open `.github/workflows/ci.yml`, delete one dependency line, push to a throwaway branch, and read which job fails.
+**Common mistake:** trusting a workflow file because it parses. Only a run shows a wrong action version or a missing package.
+
+### Code-owned loop: the key idea
+
+**Key concept:** put decisions in code and wording in the LLM. `session.plan_turn()` is pure: it decides bank question, follow-up or wrap-up, and the LLM only writes the reaction. The code can be tested exactly; the model cannot.
+**Interview question:** Why not let the LLM decide when to move to the next question?
+*Short answer:* It is unpredictable and untestable. If the model decides, a bad reply can loop forever or skip questions. With code deciding, the worst the LLM can do is word a follow-up badly, and an invalid reply falls back to `move_on`.
+**Exercise:** change the follow-ups-per-question limit and write the test first. Which tests should fail?
+**Common mistake:** trusting parsed LLM output. Validate it, and have a fallback for an invalid reply.
+
+### Docker: image vs container
+
+**Key concept:** an image is the frozen recipe result (files + dependencies); a container is one running copy of it. Secrets go in at run time with `-e`, never into the image.
+**Exercise:** run the image twice on different host ports. Do the two sessions share any state? (They should not.)
+**Not built yet (pending):** the `WITH_ASR=1` image with Whisper. Its size and first-run model download are unmeasured.
+
+## System design: handling user load (basics + how this project applies them) (2026-11-04)
+
+```mermaid
+flowchart LR
+  U[many users<br/>WebSockets] --> E["one uvicorn process<br/>one event loop"]
+  E -->|"await (I/O): LLM, TTS"| X[other sessions keep running]
+  E -->|"to_thread (CPU): Whisper"| W["ASR worker<br/>~4 answers/s max"]
+  W -->|"waiting requests pile up"| Q["latency grows<br/>asr p50 674 ms to 7167 ms"]
+```
+
+**Basics, in plain words**
+- **Latency** = time for one request. **Throughput** = requests per second. **Capacity** = the throughput where latency starts to climb.
+- **Bottleneck** = the slowest stage; the whole system can't go faster than it. Find it by timing every stage, not the whole.
+- **I/O-bound vs CPU-bound.** I/O-bound work (waiting for Gemini) is cheap with async: one process serves many sessions. CPU-bound work (Whisper) uses a core and queues.
+- **Percentiles.** p50 is the typical request, p95 is the slow tail. Averages hide the tail, so we report p50/p95 per stage.
+- **Closed vs open loop.** Closed: each simulated user waits for the reply before the next request (what we ran). Open: requests arrive at a fixed rate regardless. Open loop shows overload more honestly; ours cannot, so it is listed as pending.
+- **Scale up vs out.** Up = bigger machine. Out = more processes/machines behind a load balancer. Out needs shared or sticky session state.
+
+**How it is applied here (all numbers from `docs/performance.md`, one laptop, load generator on the same machine)**
+| Idea | In this project | Result |
+|---|---|---|
+| Async for I/O | WebSocket handlers `await` providers | fake providers: 0 failures, throughput about linear to 100 users (336 req/s); no saturation found |
+| Offload CPU work | Whisper and delivery analysis in `asyncio.to_thread` | other stages stayed small (`llm_total` p95 at most 16 ms) while 32 answers waited for ASR |
+| Find the bottleneck | per-stage timers + `/metrics` + dashboard | real Whisper plateaus at about 4 answers/s; at 32 users asr p50 is 7167 ms |
+| Deadlines | `with_deadline`, `Timeouts` (env-configurable) | the 30 s ASR deadline never fired (worst p95 8.5 s); whether 30 s is right is undecided |
+| Bounded work | audio capped at 60 s, interview time limit | one session cannot hold the server forever |
+| Measure, don't guess | Locust sweep, 3 repeats, fresh server per step | repeats agree closely; the 200-user run was generator-limited, so not a capacity figure |
+
+**Honest gaps:** there is no queue or per-session limit in the app (Architecture doc: "measured, not implemented"); the plateau explanation ("one transcription at a time") is untested; no open-loop, long-run, memory, or separate-machine test; real Gemini was never load tested (free tier).
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| Process model | one uvicorn worker | several workers, several machines | simplest, and session state stays in memory; one core runs Python, so CPU-bound work caps throughput. More workers would need sticky sessions or shared state |
+| Whisper placement | in-process thread | separate service/queue | no new infrastructure (CLAUDE.md rule); a timed-out thread keeps using CPU until it finishes |
+| Overload policy | none yet, only deadlines | reject new sessions, bounded queue | less code; under overload latency grows instead of failing fast |
+
+**Key concept:** find the bottleneck first, then scale that stage. Adding workers to a stage that is not the limit changes nothing.
+**Interview question:** Your service handles 4 requests per second and latency explodes at 16 users. What do you do?
+*Short answer:* Read the per-stage timings to confirm which stage queues (here ASR). Then either make that stage faster (smaller model, more workers or cores) or limit concurrency and reject or queue extra work so latency stays bounded. Re-measure after each change; do not tune the other stages.
+**Exercise:** change faster-whisper's `num_workers` (or `cpu_threads`), rerun the 8 and 16 user steps, and check whether the 4/s plateau moves. That tests the one untested explanation.
+**Common mistake:** quoting an average or a closed-loop number as "capacity", or load testing with the generator on the same machine and calling it a server limit.
+
+## DevOps: how the code gets built, checked and run (2026-11-04)
+
+```mermaid
+flowchart LR
+  A[git push / PR] --> B[GitHub Actions]
+  B --> T["test: clean Python 3.13<br/>pip install, pytest"]
+  B --> D["docker: build image<br/>run, curl 4 endpoints"]
+  D --> R["container: non-root,<br/>HEALTHCHECK /health"]
+  R --> O["/metrics + JSON logs<br/>with session id"]
+```
+
+**Basics, in plain words**
+- **CI** (continuous integration): every push runs the tests on a clean machine, so "works on my laptop" gets caught.
+- **Container image**: your app plus its dependencies frozen into one file; a **container** is a running copy. Same image runs the same everywhere.
+- **Layer caching**: each Dockerfile line is a cached layer; put rarely-changing steps (dependencies) before often-changing ones (code).
+- **Config via environment variables, secrets never in the image** (twelve-factor style).
+- **Least privilege**: run as a non-root user; publish ports only where needed.
+- **Health check**: a cheap endpoint the platform polls to know the app is alive.
+- **Observability**: logs (what happened, per session id), metrics (how it is behaving), so you can debug without guessing.
+
+**How it is applied here**
+| Idea | Where | What it gives |
+|---|---|---|
+| Clean-environment tests | `.github/workflows/ci.yml` job `test` (Python 3.13, pip cache, `faulthandler_timeout=60`) | a hung test is reported instead of burning the whole job; undeclared dependencies fail |
+| Image build check | job `docker`: build, run, `curl` `/health`, `/`, `/metrics`, `/dashboard` | proves the image starts and serves, not just that it builds |
+| Cheap CI hygiene | `concurrency` cancels older runs on the same ref; `timeout-minutes: 15`; `permissions: contents: read` | no wasted runs, no stuck jobs, minimal token rights |
+| Layer order | `Dockerfile`: requirements copied and installed before `backend/` | code edits do not reinstall dependencies |
+| Optional heavy dependency | `ARG WITH_ASR=0` | default image is small (251 MB measured once) and needs no model download |
+| Non-root + healthcheck | `useradd --uid 10001`, `HEALTHCHECK` on `/health` | smaller blast radius; the container reports itself healthy |
+| Config and secrets | `TIMEOUT_*`, `INTERVIEW_TIME_LIMIT_S`, `METRICS_WINDOW` env vars; `.env.example`, `.gitignore`; keys via `-e` | no secrets in git or image; a bad value fails loudly at startup |
+| Observability | `backend/logs.py` (JSON line, `session_id`), `/metrics`, `/dashboard` | trace one session through the logs; see p50/p95 per stage |
+
+**Not done:** deployment anywhere (no hosting, by choice: free-only), the `WITH_ASR=1` image, a load test in CI (a shared runner would make the numbers meaningless), pinned dependency hashes.
+
+### Design decisions
+| Decision | Choice | Alternatives | Trade-off |
+|---|---|---|---|
+| CI platform | GitHub Actions | Jenkins, GitLab CI | free for this repo and next to the code; tied to GitHub |
+| Docker in CI | build and smoke-test | build only | slower, but catches "builds but does not start" |
+| Orchestration | none (`docker run`) | Compose, Kubernetes | CLAUDE.md forbids infrastructure without a stated need; one container needs none |
+
+**Key concept:** automate the checks you would otherwise do by hand, and make the environment a written recipe (Dockerfile + requirements + workflow).
+**Interview question:** What happens between `git push` and a running container in your project?
+*Short answer:* Actions starts two parallel jobs: one installs dependencies in a clean Python 3.13 and runs pytest, the other builds the Docker image, starts it and curls the endpoints. I run the image locally with `docker run`, publishing the port on 127.0.0.1 only. There is no automatic deploy; I did not need one, and I won't claim one exists.
+**Exercise:** add a `/ready` check or a Compose file only if you can name the need; otherwise write the reason you did not.
+**Common mistake:** a Dockerfile that copies the whole repo (including `.env`) before installing dependencies: secrets land in the image and every code edit busts the dependency cache. Use `.dockerignore` and copy requirements first.
