@@ -1,12 +1,67 @@
 # Voice Coach: a spoken mock-interview coach
 
-The coach asks an interview question out loud, taken from a curated question bank. You answer into your microphone. The app transcribes it, an LLM writes a short follow-up about your answer, and the app speaks it. Controls: start / pause / end, topic and difficulty, a live transcript, and a short end summary.
+[![CI](https://github.com/nik1taa28/voice-coach/actions/workflows/ci.yml/badge.svg)](https://github.com/nik1taa28/voice-coach/actions/workflows/ci.yml)
+![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-WebSockets-009688)
+![Tests](https://img.shields.io/badge/tests-308%20passing-brightgreen)
 
-Built as a portfolio project to practise async Python, WebSockets, provider interfaces, reliability and testing. It is deliberately small: a plain prompt plus conversation history, no RAG, no agent framework, no paid services.
+A voice-first interview practice tool. The coach **asks a technical question out loud**, you **answer by microphone**, your speech is **transcribed locally with Whisper**, an **LLM (Gemini) decides whether to probe deeper or move on**, and the reply is **spoken back**. At the end you get a written summary and **measured delivery feedback** (words per minute, filler words, pauses).
 
-> **Demo mode needs no keys.** The default ASR, LLM and TTS are deterministic fakes. The page labels each fake stage ("FAKE speech recognition", "FAKE coach", "FAKE voice: a beep"). A fake never passes as real.
+Built with async Python, FastAPI and WebSockets, with a focus on what makes real-time systems hard: cancellation, timeouts, fallbacks, latency measurement and load testing. Free tools only; runs with **no API keys** in demo mode.
 
-## Quick start (demo mode)
+![An interview in progress: the coach asks a bank question, then pushes deeper on the answer](docs/images/interview.png)
+
+| Setup and controls | End summary with measured delivery feedback |
+|---|---|
+| ![Home page with topic, difficulty and question count](docs/images/home.png) | ![Summary written by Gemini plus delivery numbers computed by code](docs/images/summary.png) |
+
+## Highlights
+
+- **Real-time audio over WebSockets.** The browser captures the mic with an AudioWorklet, downsamples to 16 kHz PCM16 and streams binary frames to FastAPI. faster-whisper runs in a worker thread (`asyncio.to_thread`), so one slow transcription doesn't block other sessions.
+- **The code runs the interview, not the LLM.** Questions come from a curated, validated bank (98 questions, 8 topics, 3 levels). After each answer the LLM only returns a JSON decision, `follow_up` or `move_on`. The code validates it, caps follow-ups, and falls back cleanly on invalid output, timeouts or errors.
+- **Reliability by design.** Each turn is a cancellable `asyncio` task. Pause, End or closing the tab cancels in-flight ASR, LLM and TTS work and closes the upstream HTTP stream. Every stage has a deadline. The LLM is retried once, and only before any output (so the user never hears a reply twice).
+- **Pluggable providers with deterministic fakes.** ASR, LLM and TTS each sit behind a small `typing.Protocol`. Fakes power demo mode and let tests inject hung, slow and flaky providers.
+- **Observability.** JSON logs carry the session id through a `contextvar`. `/metrics` reports p50/p95 per stage plus an error rate, `/dashboard` shows them live, and a Locust load test produced the baseline report.
+- **Delivery feedback from signals, not ML.** Pauses come from audio energy, and words per minute and fillers from the transcript. The numbers are computed by code, never guessed by the LLM.
+- **Shipped properly.** 308 pytest tests, a Docker image (non-root, healthcheck, 251 MB) and GitHub Actions CI that tests and smoke-runs the container.
+
+## How it works
+
+```mermaid
+flowchart LR
+  subgraph Browser
+    Mic[mic → 16 kHz PCM16]
+    Voice[speech output]
+  end
+  Mic -- "WebSocket<br/>binary frames" --> WS["FastAPI /ws"]
+  WS --> Turn["turn task<br/>(cancellable, per-stage deadlines)"]
+  Turn --> ASR["ASR<br/>faster-whisper, local"]
+  ASR --> Dec["LLM decision<br/>Gemini → JSON"]
+  Dec --> Val{"validated<br/>by code"}
+  Val -- follow_up --> Say[sentence splitter → TTS]
+  Val -- "move_on / invalid / timeout" --> Bank[("question bank<br/>next question")]
+  Bank --> Say
+  Say -- "speak messages" --> Voice
+```
+
+A session is a state machine (`idle → listening ⇄ thinking → ending → ended`, plus `paused`). Every event is checked in one place, and history is written only when a reply completes, so a cancelled turn rolls back cleanly. The interview ends by itself after the chosen number of questions, at a time limit (15 min by default), or when you press End.
+
+Full protocol, state diagram and per-part status: [docs/architecture.md](docs/architecture.md).
+
+## Measured performance
+
+Real measurements on one Apple M3 laptop (8 cores, 16 GB). The load generator ran on the same machine, so treat these as relative behaviour, not server capacity. Method, raw data and caveats: [docs/performance.md](docs/performance.md).
+
+![Live metrics dashboard: p50/p95 latency per pipeline stage, turn outcomes and error rate](docs/images/dashboard.png)
+
+| Scenario | Result |
+|---|---|
+| A real interview in Chrome (Whisper `tiny.en`, Gemini 2.5 Flash, browser voice) | A **25 s spoken answer transcribed in 614 ms**; Gemini first token 2848 ms; stop press → first sound 3636 ms *(single session)* |
+| Load test, fake providers, 1 → 100 concurrent users (3 repeats each) | **0 failures**, throughput scaled about linearly to ~337 req/s, server-side p50 under 5 ms at 100 users |
+| Load test, real Whisper, 1 → 32 users | 0 failures. Throughput plateaus at **about 4 answers/s**; beyond 8 users, ASR p50 grows from 674 ms to 7.2 s (queueing in the ASR stage, found from per-stage metrics) |
+| Whisper cold start | first transcription 788–898 ms including model load (6 fresh servers) |
+
+## Quick start (demo mode, no keys)
 
 ```bash
 python3 -m venv .venv
@@ -14,133 +69,94 @@ python3 -m venv .venv
 .venv/bin/python -m uvicorn backend.main:app
 ```
 
-Open http://127.0.0.1:8000, choose a topic and difficulty, press Start, then record an answer with the microphone button. With fakes the "transcript" only reflects the audio length, and the coach's questions are canned.
+Open http://127.0.0.1:8000, pick a topic and level, press **Start interview**, then **Start recording**. In demo mode every fake stage is labelled on the page ("FAKE coach", "FAKE voice: a beep"); a fake never passes as real.
 
-## Real providers (all free)
-
-Nothing loads `.env` automatically yet. Export the variables in your shell. See `.env.example`.
+### Real providers (all free)
 
 | Stage | Setting | Options | Notes |
 |---|---|---|---|
-| ASR | `ASR_PROVIDER` | `fake` (default), `whisper` | `whisper` = local faster-whisper (`tiny.en`, int8, CPU). `pip install -r requirements-asr.txt`. Audio stays on the machine; the first call downloads the model |
-| LLM | `LLM_PROVIDER` | `fake` (default), `gemini` | Gemini free tier over plain HTTPS + server-sent events. Needs `GEMINI_API_KEY`. Transcripts leave the machine. Never hard-code the key |
-| TTS | `TTS_PROVIDER` | `fake` (default, a beep), `browser` | `browser` uses the browser's `speechSynthesis`; the server cannot time it. Voices differ per browser and OS |
-
-Example: `ASR_PROVIDER=whisper LLM_PROVIDER=gemini TTS_PROVIDER=browser GEMINI_API_KEY=... .venv/bin/python -m uvicorn backend.main:app`
-
-## How it works
-
-```mermaid
-flowchart LR
-  subgraph Browser
-    Mic[mic] --> PCM[16 kHz PCM16]
-    Q[speech queue]
-  end
-  PCM -- "binary frames" --> WS["/ws (FastAPI)"]
-  WS --> T[turn task]
-  T --> ASR[ASRProvider]
-  ASR --> LLM[LLMProvider<br/>streams pieces]
-  LLM --> SP[sentence splitter]
-  SP --> TTS[TTSProvider]
-  LLM -- coach_delta --> WS
-  TTS -- speak --> WS
-  WS -- "JSON + audio" --> Q
-```
-
-- **Providers behind small interfaces** (`typing.Protocol`), each with a deterministic fake used by demo mode and tests.
-- **Honest streaming:** audio is streamed in, but ASR waits for the whole utterance. The LLM streams its reply to the server, but **follow-ups are not streamed to you**: the reply is a JSON decision that must be complete and valid before anything is said. Then each sentence goes to TTS in turn. (Before the code-owned loop, sentence 1 was spoken while the model wrote sentence 2; that was given up for validation.)
-- **State machine** (`session_state.py`): idle, listening, thinking, paused, ended. Every event is checked in one place; history is written only when a reply is complete.
-- **Reliability (M4):** each answer runs as a cancellable task so the server keeps reading Pause / End / disconnect. Per-stage deadlines; the LLM is retried once, only before its first piece (a later retry would repeat text the user already saw); a closed tab cancels the work and closes the upstream stream.
-- **Question bank and a code-owned loop:** the main questions are curated data (`data/question_bank.json`, validated at startup), spoken word for word with no LLM call and never repeated in a session. After each answer the LLM returns `{"action": "follow_up" | "move_on", "text": ...}`, seeing the question's key points as hidden context. The **code** validates that JSON, caps follow-ups (at most 2, `FOLLOWUPS_PER_QUESTION`; the model is not asked once the cap is reached), and falls back to "Thanks for that answer." plus the next question on invalid output, a timeout or an error. The interview ends by itself after 5/6/8/10 questions (default 6), at the time limit (`INTERVIEW_TIME_LIMIT_S`, default 15 min), or when the bank runs out, or when you press End, then goes through an `ending` state: closing line, summary, closed.
-- **Timing:** server stages use `time.perf_counter()`. The browser measures stop-press to first sound on its own clock; the two clocks are never mixed.
-
-Full detail, protocol and per-part status (Planned / Implemented / Verified): [docs/architecture.md](docs/architecture.md). Design decisions and what I learned: [docs/learning-notes.md](docs/learning-notes.md).
-
-## Tests
+| Speech recognition | `ASR_PROVIDER` | `fake` (default), `whisper` | Local faster-whisper (`tiny.en`, int8, CPU); `pip install -r requirements-asr.txt`. Audio never leaves the machine |
+| Coach (LLM) | `LLM_PROVIDER` | `fake` (default), `gemini` | Gemini free tier over HTTPS + server-sent events. Needs `GEMINI_API_KEY` |
+| Voice | `TTS_PROVIDER` | `fake` (default, a beep), `browser` | The browser's `speechSynthesis` |
 
 ```bash
-.venv/bin/python -m pytest -q
+ASR_PROVIDER=whisper LLM_PROVIDER=gemini TTS_PROVIDER=browser GEMINI_API_KEY=... \
+  .venv/bin/python -m uvicorn backend.main:app
 ```
 
-236 tests pass at the time of writing (`.venv/bin/python -m pytest -q`, run on 2026-11-03): unit tests, plus WebSocket tests using slow and failing fakes (hung or flaky LLM, hung ASR/TTS, Pause/End mid-reply, disconnect), and the metrics, logging and dashboard tests added in M5. An earlier version of the suite (186 tests) passed in a clean virtual environment built the way CI builds it; the current 236 have not been re-run that way. Note that `tests/test_whisper.py` needs numpy, which comes with `requirements-asr.txt`. The suite has no per-test timeout; if one hangs, run it with `-o faulthandler_timeout=15` to see where.
+`.env` is not loaded automatically; export the variables in your shell (see `.env.example`). Never commit a key.
 
-## Measured (honest numbers)
-
-All numbers are from one Apple M3 laptop (8 cores, 16 GB), with the load generator on the same machine, so they show relative behaviour, not what a dedicated server would do. Full tables, setup and caveats: [docs/performance.md](docs/performance.md).
-
-| What | Result |
-|---|---|
-| Fake providers, 1 to 100 virtual users, 3 repeats each | 0 failures; throughput grows about linearly to 336-338 req/s; no saturation found. Server stage time at 100 users: `llm_total` p50 4.7-4.8 ms, p95 5.0-5.1 ms (mostly the fake TTS) |
-| Real faster-whisper `tiny.en`, 1 to 32 users (fake LLM and TTS, one run per step) | 0 failures, no timeouts. Throughput stops growing at about 4 answers/s. Speech-recognition p50: 242 ms (1 user), 674 ms (8), 2868 ms (16), 7167 ms (32). The speech is one 7.9 s clip made with the macOS `say` voice, **not a human** |
-| Whisper cold start (6 fresh servers) | model load 465-577 ms, first transcription 788-898 ms |
-| Earlier single samples (M1-M3, not distributions) | Whisper warm call 987.6 ms for 7.3 s of audio; Gemini `gemini-2.5-flash` opener TTFT 3129 ms, total 3283 ms; stop-press to first sound with fake ASR/LLM 52 ms (fake voice), 69 ms (browser voice) |
-
-**Not measured:** real Gemini under load, the whole real pipeline (Whisper + Gemini + voice) end to end, real browser voices under load, memory use. Low-user fake-provider numbers are inflated by an idle-clocked CPU (a 1-user step ran about 3x faster with other cores busy).
-
-## Observability
-
-- `GET /metrics`: JSON with p50/p95 per stage (`asr`, `llm_ttft`, `llm_total`, `first_sentence`, `first_speak`, `tts`), outcome counters and `error_rate`. In memory, per process, no authentication. `METRICS_WINDOW` (default 1000) sets how many recent samples each stage keeps.
-- `GET /dashboard`: a small page that polls `/metrics` every 2 s.
-- Logs are one JSON object per line, each with the `session_id`. uvicorn's own lines stay plain text.
-- Load test: `pip install -r requirements-dev.txt`, then `bash loadtest/sweep.sh 1 10 50 100` (see the header of `loadtest/locustfile.py`).
-
-## Docker
+### Docker
 
 ```bash
 docker build -t voice-coach .
-docker run --rm -p 127.0.0.1:8000:8000 voice-coach      # demo mode, no keys
+docker run --rm -p 127.0.0.1:8000:8000 voice-coach      # demo mode
 ```
 
-Publish the port on `127.0.0.1` only: `/metrics` has no authentication. To use real providers, pass the same variables as above with `-e` (for example `-e LLM_PROVIDER=gemini -e GEMINI_API_KEY=...`; never put a key in the image). `docker build --build-arg WITH_ASR=1 .` adds local Whisper (large; the model downloads inside the container on first use). **Status: the Dockerfile has not been built yet** (no Docker daemon was running when it was written); see `docs/architecture.md`.
+Pass real-provider settings with `-e`. `--build-arg WITH_ASR=1` adds local Whisper (a larger image). The port is published on `127.0.0.1` only because `/metrics` has no authentication.
 
-## CI
+## Tests and CI
 
-`.github/workflows/ci.yml` runs on every push and pull request: the test suite on Python 3.13 (installing `requirements-asr.txt` for numpy), and a Docker job that builds the image, starts it and checks `/health`, `/`, `/metrics` and `/dashboard`. **Status: not run on GitHub yet.** The same install and test steps were run in a clean virtual environment locally (186 passed).
+```bash
+.venv/bin/python -m pytest -q        # 308 passed in ~6 s
+```
+
+Unit tests cover the state machine, the decision validator, the question bank, the sentence splitter, metrics and delivery analysis. WebSocket tests use fakes that **hang, run slow or fail** to check Pause and End mid-reply, LLM timeouts and retries, invalid LLM output, TTS failure and client disconnect. CI runs the suite on every push, then builds the Docker image, starts it and checks `/health`, `/`, `/metrics` and `/dashboard`.
+
+## Observability
+
+- `GET /metrics`: JSON with p50/p95 per stage (`asr`, `llm_ttft`, `llm_total`, `first_sentence`, `first_speak`, `tts`), outcome counters, `error_rate` and an LLM fallback count.
+- `GET /dashboard`: a live page polling `/metrics` every 2 s.
+- Structured JSON logs, one line per event, each tagged with the `session_id`.
+- Load test: `pip install -r requirements-dev.txt`, then `bash loadtest/sweep.sh 1 10 50 100`.
+
+## Design decisions
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| Questions from a curated bank; the LLM only decides follow-up vs move-on | Predictable, on-topic interviews; the model can't invent or repeat questions | The bank needs to be written and maintained by hand |
+| The LLM returns validated JSON instead of free text | The code enforces the follow-up cap and catches bad output | Follow-ups wait for the full reply instead of streaming (measured cost: ~14 ms median over 3 real calls) |
+| Retry the LLM only before any output | A retry after output would make the user hear text twice | A permanent error (bad key) still costs one retry |
+| Whisper in `asyncio.to_thread` | Keeps the event loop free while the CPU decodes | A timed-out thread can't be killed; it finishes in the background |
+| Monotonic clocks per stage; browser and server clocks never mixed | Accurate, comparable latency numbers | The browser's voice timing is measured only on the client |
+
+More decisions with alternatives: [docs/learning-notes.md](docs/learning-notes.md).
 
 ## Known limitations
 
-- The deadlines (ASR 30 s, LLM first piece 10 s, LLM total 30 s, TTS 5 s per sentence) are starting guesses, overridable with `TIMEOUT_*` variables. They are not tuned from data.
-- A timed-out Whisper call cannot be killed: its worker thread keeps using CPU until it finishes.
-- Follow-ups wait for the complete LLM reply before the first word is spoken (validation needs the whole JSON). How much later first sound comes with real Gemini is **not measured yet**.
-- How often real Gemini returns invalid decision JSON (and so falls back) is **not measured yet**; the dashboard's "LLM fallbacks" tile counts it, and fallbacks are not in the error rate.
-- No fallback providers (for example a second LLM). The only fallbacks are the LLM retry and a text-only reply when TTS fails.
-- Tested in VS Code's built-in browser only (probably Chromium, not confirmed). Real Chrome, Safari and Firefox are untested. `speechSynthesis` behaves differently across them.
-- The spoken summary is text only. The tail of the audio (under about 43 ms) is dropped when recording stops.
-- Not yet verified with real Gemini or Whisper through the M4 task path, and the whole real pipeline has not been timed.
-- The question bank has 98 questions in 8 topics (11 or more per topic since 2026-11-10), written by me and not reviewed by anyone else; the difficulty labels are my own judgement. Questions are picked at random without repeats; when a topic and level runs out, the coach says so and you press End.
-- Not yet run with real Gemini: whether the model keeps to the key points, avoids reading them out, and stays on the question is **unverified** (the fake LLM cannot show it).
-- No limits across sessions: under real Whisper, extra users only wait longer (see Measured).
+- **Push-to-talk.** There's no voice activity detection or barge-in, and ASR waits for the whole answer. In the one real session, stop → first sound was about 3.6 s.
+- **Single process, in-memory sessions**, with no admission limit. Past about 4 answers/s, users wait longer instead of being told the server is busy.
+- **`tiny.en` mishears some technical words** (e.g. "GIL" → "Gail"). Larger Whisper models are supported but their latency hasn't been measured yet.
+- **No persistence.** Session history isn't saved between interviews.
+- Tested in Chrome; Safari and Firefox are untested. Timeouts are starting values, not yet tuned from data. The question bank is self-written and self-reviewed.
+
+Per-part status (Planned / Implemented / Verified): [docs/architecture.md](docs/architecture.md).
 
 ## Project layout
 
 ```
 backend/
-  main.py            FastAPI app, /health, /ws, turn task, SafeSender
+  main.py            FastAPI app: /health, /ws, turn task, SafeSender
   session_state.py   interview state machine (pure)
-  reliability.py     deadlines, retry rule, TurnRunner (pure asyncio)
-  sessions.py        message builders, utterance buffer
-  metrics.py         in-memory p50/p95 per stage, outcome counters (pure)
-  logs.py            JSON log lines with the session id (contextvar)
+  decision.py        validates the LLM's JSON decision
+  reliability.py     deadlines, retry rule, TurnRunner
+  questions.py       question bank: load, validate, pick
+  delivery.py        words per minute, fillers, pauses (pure, no numpy)
+  metrics.py         p50/p95 per stage, outcome counters
+  logs.py            JSON logs with the session id (contextvar)
   sentences.py       streaming sentence splitter
-  prompts.py         prompts (follow-up with key points, end summary) + history window
-  questions.py       curated question bank: load, validate, pick (pure)
-  asr/ llm/ tts/     provider interface + fake + real implementations
-data/
-  question_bank.json the questions: id, topic, difficulty, question, key points
-frontend/            index.html (the app) and dashboard.html, plain HTML + vanilla JS
-loadtest/            Locust file, sweep/warm-up/summary scripts, raw results
-tests/               pytest; fakes with slow / failing modes
-docs/                architecture, learning notes, performance, project brief
-Dockerfile, .github/workflows/ci.yml
+  prompts.py         follow-up and summary prompts
+  asr/ llm/ tts/     provider interface + fake + real implementation
+data/question_bank.json   98 questions: topic, difficulty, question, key points
+frontend/            index.html (app) and dashboard.html, plain HTML + vanilla JS
+loadtest/            Locust file, sweep scripts, raw results
+tests/               pytest, with slow / failing fakes
+docs/                architecture, performance, learning notes
 ```
 
-## Roadmap
+## What's next
 
-| Module | Status |
-|---|---|
-| M0 skeleton, M1 mic to ASR, M2 LLM + state machine, M3 TTS + pipeline, M4 reliability | done |
-| M5 structured logs, `/metrics`, latency dashboard, load test, baseline report | done |
-| M6 Docker, GitHub Actions CI, README numbers | Docker image built and run locally in demo mode (251 MB, healthy, full interview through the container); CI passed on GitHub on its first run (green tick, user-reported; details not recorded) |
-| Curated question bank (JSON): bank questions, LLM follow-ups, `GET /topics`, topic dropdown | done; two real Gemini sessions checked by hand |
-| Code-owned loop: JSON follow_up / move_on decisions with fallback, follow-up cap, automatic ending (count, time, bank), `ending` state | done (279 tests, one real-server run in demo mode); real Gemini run pending |
-| Delivery feedback (words per minute, fillers, pauses, answer length), measured and written by code | done (tests, the detector on the `say` test clip, and one real session in Chrome with a real microphone, user-reported 2026-11-10) |
+- Voice activity detection and barge-in (interrupt the coach mid-sentence)
+- Saved session history to track progress across interviews
+- A hosted demo-mode instance
+- An evaluation set: Whisper word error rate on technical terms, and the share of valid LLM decisions over many calls

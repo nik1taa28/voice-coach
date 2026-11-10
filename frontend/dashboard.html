@@ -40,7 +40,7 @@
   thead th { color: var(--accent); }
   tbody tr:last-child td { border-bottom: 0; }
   td { font-variant-numeric: tabular-nums; }
-  td small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+  th small, td small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
   .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
 </style>
 </head>
@@ -71,7 +71,7 @@
       <tbody>
         <tr data-stage="asr"><th scope="row">Speech recognition<small>asr, from utterance end to transcript</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
         <tr data-stage="llm_ttft"><th scope="row">LLM first piece<small>llm_ttft, includes a retry if one happened</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
-        <tr data-stage="llm_total"><th scope="row">LLM whole reply<small>llm_total, includes inline TTS and sends</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
+        <tr data-stage="llm_total"><th scope="row">LLM whole reply<small>llm_total, request until the complete reply</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
         <tr data-stage="first_sentence"><th scope="row">First sentence complete<small>first_sentence, from turn start</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
         <tr data-stage="first_speak"><th scope="row">First speech message sent<small>first_speak, from turn start</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
         <tr data-stage="tts"><th scope="row">Speech synthesis<small>tts, server voices only</small></th><td class="n">–</td><td class="p50">–</td><td class="p95">–</td></tr>
