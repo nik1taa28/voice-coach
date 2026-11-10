@@ -107,7 +107,7 @@ Publish the port on `127.0.0.1` only: `/metrics` has no authentication. To use r
 - Tested in VS Code's built-in browser only (probably Chromium, not confirmed). Real Chrome, Safari and Firefox are untested. `speechSynthesis` behaves differently across them.
 - The spoken summary is text only. The tail of the audio (under about 43 ms) is dropped when recording stops.
 - Not yet verified with real Gemini or Whisper through the M4 task path, and the whole real pipeline has not been timed.
-- The question bank has 86 questions in 7 topics (12 or more per topic since 2026-11-10), written by me and not reviewed by anyone else; the difficulty labels are my own judgement. Questions are picked at random without repeats; when a topic and level runs out, the coach says so and you press End.
+- The question bank has 98 questions in 8 topics (11 or more per topic since 2026-11-10), written by me and not reviewed by anyone else; the difficulty labels are my own judgement. Questions are picked at random without repeats; when a topic and level runs out, the coach says so and you press End.
 - Not yet run with real Gemini: whether the model keeps to the key points, avoids reading them out, and stays on the question is **unverified** (the fake LLM cannot show it).
 - No limits across sessions: under real Whisper, extra users only wait longer (see Measured).
 
