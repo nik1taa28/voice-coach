@@ -245,3 +245,4 @@ flowchart LR
 | Thresholds (30 ms frames, pause of 1 s, `MIN_RMS` 200, 10% relative) | Guesses | not tuned against human speech |
 | Filler count with real Whisper | Known limitation | Whisper often leaves out "um" / "uh", so the count is a lower bound; the page says so next to the number. Ambiguous words ("like", "so", "actually") are not counted |
 | Page: per-answer numbers in the timing line, delivery line with caveats under the summary | Implemented (string tests only) | **not seen in a browser yet** |
+| Soft light restyle of `index.html` and `dashboard.html` (CSS only; two `data-` attributes set in `refresh()` for the recording look; dark mode follows the OS) | Implemented (string tests + full suite: 307 passed) | **not seen in a browser yet**; the recording look needs a real microphone; reduced-motion, dark mode and phone width unchecked |

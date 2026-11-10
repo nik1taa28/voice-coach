@@ -5,48 +5,101 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Voice Coach</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
-  button { font-size: 1rem; padding: .5rem 1rem; }
-  #status { color: #555; margin: .75rem 0; }
-  #warn { color: #b45309; font-weight: 600; min-height: 1.2em; }
-  #timing { font-family: ui-monospace, monospace; font-size: .85rem; color: #333; min-height: 1.2em; }
-  #transcript { list-style: none; padding: 0; }
-  #transcript li { border-left: 3px solid #999; padding: .25rem .75rem; margin: .5rem 0; }
-  #transcript li.error { border-color: #b91c1c; color: #b91c1c; }
-  #transcript li.coach { border-color: #1d4ed8; }
-  #transcript li.you { border-color: #15803d; }
-  #setup, #controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .5rem 0; }
-  #topic { font-size: 1rem; padding: .4rem; flex: 1 1 12rem; max-width: 100%; }
-  select { font-size: 1rem; padding: .4rem; }
-  #summary { border: 1px solid #999; padding: .5rem .75rem; margin-top: 1rem; white-space: pre-wrap; }
+  :root {
+    --bg: #faf7f2; --card: #fffdf9; --ink: #2a2420; --muted: #7a6f66; --line: #ebe4d8;
+    --accent: #c2410c; --accent-hover: #9a3412; --accent-ink: #ffffff; --accent-soft: #fdeedd; --accent-glow: rgba(194,65,12,.28);
+    --you-soft: #f1ece3; --you-ink: #3b332c; --coach-ink: #7c2d12;
+    --err: #b91c1c; --err-soft: #fdecec; --warn: #92400e; --rec: #b91c1c;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1613; --card: #231e1a; --ink: #f1ebe3; --muted: #a39789; --line: #352e28;
+      --accent: #fb923c; --accent-hover: #fdba74; --accent-ink: #1a1613; --accent-soft: #3a2519; --accent-glow: rgba(251,146,60,.3);
+      --you-soft: #2d2721; --you-ink: #eae2d8; --coach-ink: #fdba74;
+      --err: #fca5a5; --err-soft: #3b1d21; --warn: #fcd34d; --rec: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 var(--sans); }
+  main { max-width: 42rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+  h1 { font-size: 1.75rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  .intro { color: var(--muted); margin: 0 0 1.25rem; font-size: .95rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; margin-bottom: 1rem;
+          box-shadow: 0 1px 2px rgba(60,40,20,.05); }
+  .card h2 { font-size: .75rem; margin: 0 0 .6rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+  #setup, #controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  select, button { font: inherit; font-size: .95rem; border-radius: 10px; padding: .55rem .85rem; border: 1px solid var(--line);
+                   background: var(--card); color: var(--ink); transition: background .15s, border-color .15s, box-shadow .15s; }
+  select { max-width: 100%; }
+  #topic { flex: 1 1 12rem; }
+  button { cursor: pointer; font-weight: 600; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { cursor: not-allowed; opacity: .45; }
+  select:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #start, #toggle { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  #start:hover:not(:disabled), #toggle:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: 0 4px 14px var(--accent-glow); }
+  #end { color: var(--err); }
+  #end:hover:not(:disabled) { border-color: var(--err); }
+  body[data-rec="true"] #toggle { background: var(--rec); border-color: var(--rec); color: #fff; animation: pulse 1.5s ease-in-out infinite; }
+  #status { display: inline-flex; align-items: center; gap: .5rem; margin: .25rem 0 .5rem; padding: .3rem .8rem; border-radius: 999px;
+            background: var(--card); border: 1px solid var(--line); font-size: .85rem; color: var(--muted); }
+  #status::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%; background: var(--muted); flex: none; }
+  body[data-state="listening"] #status::before { background: var(--accent); }
+  body[data-state="thinking"] #status::before, body[data-state="ending"] #status::before { background: #d97706; }
+  body[data-rec="true"] #status { color: var(--rec); }
+  body[data-rec="true"] #status::before { background: var(--rec); }
+  #warn { color: var(--warn); font-weight: 600; font-size: .9rem; min-height: 1.2em; margin-bottom: .5rem; }
+  #transcript { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .6rem; min-height: 3rem; }
+  #transcript li { max-width: 85%; padding: .6rem .9rem; border-radius: 16px; overflow-wrap: anywhere; }
+  #transcript li.coach { align-self: flex-start; background: var(--accent-soft); color: var(--coach-ink); border-bottom-left-radius: 4px; }
+  #transcript li.you { align-self: flex-end; background: var(--you-soft); color: var(--you-ink); border-bottom-right-radius: 4px; }
+  #transcript li.error { align-self: center; max-width: 100%; background: var(--err-soft); color: var(--err); border-radius: 999px; font-size: .9rem; }
+  #timing { margin-top: .8rem; font: .72rem/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; min-height: 1.1em; }
+  #summary { white-space: pre-wrap; background: var(--card); border: 1px solid var(--accent); border-radius: 14px; padding: 1rem 1.1rem;
+             }
   #summary:empty { display: none; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 8px rgba(185,28,28,.2); } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
+<main>
 <h1>Voice Coach</h1>
-<p>Pick a topic, level and number of questions, start, and answer by voice. The coach asks questions from the question bank and may follow up on your answers. The interview ends by itself after the chosen number of questions or at the time limit (15 minutes by default), or when you press End.</p>
-<div id="setup">
-  <select id="topic" aria-label="Topic" disabled><option>loading topics…</option></select>
-  <select id="difficulty" aria-label="Difficulty">
-    <option>easy</option><option selected>medium</option><option>hard</option>
-  </select>
-  <select id="count" aria-label="Number of questions">
-    <option value="5">5 questions</option><option value="6" selected>6 questions</option>
-    <option value="8">8 questions</option><option value="10">10 questions</option>
-  </select>
-  <button id="start" disabled>Start interview</button>
-</div>
-<div id="controls">
-  <button id="toggle" disabled>Start recording</button>
-  <button id="pause" disabled>Pause</button>
-  <button id="resume" disabled>Resume</button>
-  <button id="end" disabled>End &amp; summarise</button>
-</div>
-<div id="status">connecting…</div>
+<p class="intro">Pick a topic, level and number of questions, start, and answer by voice. The coach asks questions from the question bank and may follow up on your answers. The interview ends by itself after the chosen number of questions or at the time limit (15 minutes by default), or when you press End.</p>
+<section class="card">
+  <h2>Setup</h2>
+  <div id="setup">
+    <select id="topic" aria-label="Topic" disabled><option>loading topics…</option></select>
+    <select id="difficulty" aria-label="Difficulty">
+      <option>easy</option><option selected>medium</option><option>hard</option>
+    </select>
+    <select id="count" aria-label="Number of questions">
+      <option value="5">5 questions</option><option value="6" selected>6 questions</option>
+      <option value="8">8 questions</option><option value="10">10 questions</option>
+    </select>
+    <button id="start" disabled>Start interview</button>
+  </div>
+</section>
+<section class="card">
+  <h2>Controls</h2>
+  <div id="controls">
+    <button id="toggle" disabled>Start recording</button>
+    <button id="pause" disabled>Pause</button>
+    <button id="resume" disabled>Resume</button>
+    <button id="end" disabled>End &amp; summarise</button>
+  </div>
+</section>
+<div id="status" role="status">connecting…</div>
 <div id="warn"></div>
-<div id="timing"></div>
-<ul id="transcript"></ul>
+<section class="card">
+  <h2>Transcript</h2>
+  <ul id="transcript"></ul>
+  <div id="timing"></div>
+</section>
 <div id="summary"></div>
+</main>
 
 <script>
 const TARGET_RATE = 16000;
@@ -92,6 +145,8 @@ function addLine(text, cls) {
 
 // Buttons follow the SERVER's state, so the page cannot drift from the real session.
 function refresh() {
+  document.body.dataset.state = state; // CSS hooks only: the look follows the same state the buttons use
+  document.body.dataset.rec = recording;
   startBtn.disabled = !(connected && topicsLoaded && state === 'idle');
   toggle.disabled = !(connected && state === 'listening' && (recording || !busy));
   // M4: the server cancels a running turn on Pause / End, so both stay available while it is thinking or processing audio.

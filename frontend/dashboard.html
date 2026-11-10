@@ -6,37 +6,41 @@
 <title>Voice Coach metrics</title>
 <style>
   :root {
-    --bg: #f6f6f4; --surface: #ffffff; --ink: #1a1a1a; --ink-2: #4f4f55; --muted: #6a6a70; --line: #e2e2de;
-    --good: #0ca30c; --critical: #d03b3b; /* status steps: fixed, never themed */
+    --bg: #faf7f2; --surface: #fffdf9; --ink: #2a2420; --ink-2: #5a4f46; --muted: #7a6f66; --line: #ebe4d8;
+    --accent: #c2410c; --good: #15803d; --critical: #b91c1c; /* status steps: fixed, never themed */
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #121212; --surface: #1b1b1b; --ink: #ececec; --ink-2: #b4b4ba; --muted: #9a9aa0; --line: #2d2d2d; }
+    :root { --bg: #1a1613; --surface: #231e1a; --ink: #f1ebe3; --ink-2: #cfc4b8; --muted: #a39789; --line: #352e28; --accent: #fb923c;
+            --good: #4ade80; --critical: #f87171; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 15px; margin: 32px 0 8px; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -.01em; }
+  h2 { font-size: 12px; margin: 32px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
   #status { margin: 0; color: var(--muted); font-size: 13px; }
   #status.bad { color: var(--ink); border-left: 3px solid var(--critical); padding-left: 8px; }
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-top: 20px; }
-  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px;
+          box-shadow: 0 1px 2px rgba(60,40,20,.05); }
   .tile.hero { grid-column: 1 / -1; }
   .label { color: var(--ink-2); font-size: 13px; }
   .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
-  .hero .value { font-size: 48px; }
+  .hero .value { font-size: 48px; color: var(--accent); }
   .detail { color: var(--ink-2); font-size: 13px; min-height: 20px; }
   .icon { font-weight: 700; margin-right: 4px; }
   .icon.good { color: var(--good); }
   .icon.bad { color: var(--critical); }
-  .scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+  .scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 8px 14px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; white-space: normal; }
   th { font-weight: 600; color: var(--ink-2); font-size: 13px; }
+  thead th { color: var(--accent); }
   tbody tr:last-child td { border-bottom: 0; }
   td { font-variant-numeric: tabular-nums; }
-  td small { display: block; color: var(--muted); font-size: 12px; }
+  td small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
   .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
 </style>
 </head>
