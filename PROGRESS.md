@@ -13,19 +13,20 @@
 | M4 reliability | Done, committed (`74ce23c`), tests pass; verified by hand on real uvicorn (fake providers) |
 | M5 observability | Done, committed (`6e1787a`). Metrics, `/metrics`, JSON logs, dashboard, Locust load test, baseline report |
 | M6 Docker / CI / README numbers | **Written, partly verified.** CI recipe verified in a clean venv; demo mode from a clean venv. **Docker image built and run locally on 2026-11-03** (demo mode: 25 s build, 251 MB, healthy, full interview through the container; the `WITH_ASR=1` image is not built) and **CI run on GitHub once (user-reported, 2026-11-03): a green tick on the Actions page for the first push of `question-loop`**. Repo: https://github.com/nik1taa28/voice-coach (`main` = M0 only; `question-loop` has everything, pull request opened by the user). Which jobs ran, durations and the run number were not reported |
-| Curated question bank | Done (`a14f113`, moved to `data/` in `2f91d68`). 65 questions, 7 topics. Summary prompt fixed after two real Gemini runs (`bb79da9`) |
+| Curated question bank | Done (`a14f113`, moved to `data/` in `2f91d68`). 86 questions, 7 topics (+21 on 2026-11-10: every topic now has at least 11). Summary prompt fixed after two real Gemini runs (`bb79da9`) |
 | Code-owned loop | Done (`0bb9a1b`..`1c54177`). JSON follow_up / move_on with fallback, follow-up cap in code, automatic end after 5/6/8/10 questions, at the time limit or when the bank runs out, `ending` state. Borrowing from the nearest level (`805f13a`). One real Gemini session: 2 valid decisions, 1 invalid-reply fallback (**cause pending**) |
-| Delivery feedback (stretch) | Done (`2d4b84c`, `6f09676`, docs). Words per minute, fillers, pauses, length; measured by code, never by the LLM. **Real microphone not validated** |
+| Delivery feedback (stretch) | Done (`2d4b84c`, `6f09676`, docs). Words per minute, fillers, pauses, length; measured by code, never by the LLM. One real session in Chrome with a real microphone worked (user-reported 2026-11-10) |
 
-**Tests:** `307 passed in 4.05s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-03.
+**Tests:** `308 passed in 5.79s` (`.venv/bin/python -m pytest -q`), run by Claude on 2026-11-10.
+
+**Done by you on 2026-11-10 (user-reported):** CI run succeeded; one real Chrome session (real Whisper, Gemini and browser voice) worked end to end, the time limit ended it, the recording look appeared. The `invalid reply` log line could not be found, so that cause stays unknown.
 
 **Needs you (in order of value):**
-1. **The `invalid reply` log line** from the real Gemini run (search your server terminal). It says why one decision fell back.
-2. **One real session** with the new build: Python basics, 6 questions. It should reach 6 by borrowing levels. Check the delivery line under the summary with your real microphone, and the page in a browser.
-3. ~~Docker~~ done in demo mode (see `docs/architecture.md`). Optional: the `WITH_ASR=1` image.
-4. ~~CI~~ pushed by the user and green; pull request merged into `main`.
-5. **Review `data/question_bank.json`**: difficulty labels are my judgement. Python basics, Data structures and Databases and SQL have 6 questions each, so 8 or 10 question interviews end early there.
-6. A server from your terminal is listening on port 8001 (PID 28719). I never touched it. The old note about port 8000 is gone: nothing listens there now.
+1. **Speech recognition accuracy:** `tiny.en` misheard several technical words. Try `ASR_MODEL=base.en` (then `small.en`) with the same session and compare. Say what you see; latency with the bigger models is not measured yet.
+2. Look at dark mode, a phone-width window and a second browser (Safari or Firefox).
+3. Optional: the `WITH_ASR=1` Docker image.
+4. Read the 21 new questions in `data/question_bank.json` (my wording; difficulty labels are my judgement).
+5. Delete the merged `fix-test-isolation` branch; decide about `.vscode/`.
 
 **Not done / pending (by choice or limits):** real Gemini under load (free tier), the whole real pipeline under load, the Whisper plateau experiment, timeout tuning from real data, `.env` auto-loading (still: `source .env`).
 
@@ -56,7 +57,7 @@ Fake providers, 1-100 users, 3 repeats: 0 failures, throughput about linear to 3
 - Open-loop load, separate load-generator machine, memory/CPU of the server, runs longer than 60 s.
 - Timeout tuning (M4 deadlines unchanged; the 30 s ASR deadline never fired in the Whisper test).
 - The `WITH_ASR=1` Docker image (not built) and per-job CI details (only a user-reported green tick).
-- Delivery feedback with a real microphone, and the new pages seen in a browser.
+- Dark mode, phone width and a second browser for the new pages.
 
 (M6, the question bank and delivery feedback are done; see the table above.)
 
